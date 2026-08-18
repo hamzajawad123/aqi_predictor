@@ -27,13 +27,19 @@ jobs:
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
-        run: python src/training_pipeline.py
+          FEATURE_GROUP_VERSION: ${{ secrets.FEATURE_GROUP_VERSION }}
+          FEATURE_VIEW_NAME: ${{ secrets.FEATURE_VIEW_NAME }}
+        run: python -m src.training_pipeline
 
-      - name: Upload SHAP + loss curve artifacts
+      - name: Upload SHAP + loss curve + comparison artifacts
         uses: actions/upload-artifact@v4
         with:
           name: training-report-${{ github.run_number }}
           path: |
             reports/shap_summary.png
             reports/lstm_loss_curve.png
+            reports/gru_loss_curve.png
+            reports/model_comparison.csv
+            reports/model_comparison_stratified.csv
+            reports/model_comparison_by_horizon.csv
           if-no-files-found: ignore

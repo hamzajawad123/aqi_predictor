@@ -35,19 +35,16 @@ def get_or_create_feature_group(fs, df_for_schema=None):
     return fg
 
 
-def get_or_create_feature_view(fs, fg, label_col: str = "aqi_target_72h"):
+def get_or_create_feature_view(fs, fg, label_col: str = "aqi_delta_72h"):
     """
-    A Feature View is what api/main.py's get_feature_vector() call needs to
-    exist first — it's a saved query/schema on top of the feature group that
-    enables fast online serving. Create this ONCE (e.g. run this file directly,
-    or call it from a one-off setup script) before your FastAPI service can
-    serve predictions.
+    A Feature View is a saved query/schema on top of the feature group.
+    Default label is the primary 72h delta target (post-EDA FE).
     """
     query = fg.select_all()
     fv = fs.get_or_create_feature_view(
         name=config.FEATURE_VIEW_NAME,
         version=1,
-        description="AQI feature view for training + online inference",
+        description="AQI feature view for training + online inference (delta targets)",
         labels=[label_col],
         query=query,
     )

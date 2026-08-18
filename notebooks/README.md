@@ -1,12 +1,14 @@
 # Notebooks
 
-- `01_eda.ipynb` — the only required notebook (the brief asks for EDA).
-  Univariate/bivariate/multivariate analysis, ACF/PACF, seasonal
-  decomposition, ADF stationarity test, and a smog-vs-normal season
-  comparison. Also exports `data/eda_snapshot.parquet`, which the Streamlit
-  EDA page reads — run this at least once after backfilling data.
+- `01_eda.ipynb` — EDA on the **raw** merged pollution+weather snapshot
+  (`data/raw/aqi_raw_merged.parquet`). Run after:
+  `python -m src.feature_pipeline raw-snapshot`
+  Covers univariate/bivariate/multivariate analysis, ACF/PACF, seasonal
+  decomposition, ADF stationarity, and smog-vs-normal comparison.
+  Ends with a **Findings for FE** section that must be reviewed before any
+  feature-engineering changes.
 
-All actual model training (all 7 models: Persistence, Prophet, Ridge,
-Random Forest, XGBoost, LightGBM, LSTM, GRU) lives in `.py` files under
-`src/`, not notebooks — that's what the automated daily GitHub Action
-actually runs. See `src/training_pipeline.py`.
+- `colab_training.ipynb` — optional Colab GPU training. Prefer calling
+  `from src.training_pipeline import train_and_evaluate` (or per-horizon
+  helpers) so Colab stays aligned with CI. Full training lives in
+  `src/training_pipeline.py` via `python -m src.training_pipeline`.

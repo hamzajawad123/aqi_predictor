@@ -3,71 +3,100 @@ Training Pipeline
 ==================
 Runs DAILY via .github/workflows/training_pipeline.yml
 
-1. Fetch historical (features, targets) from the Hopsworks Feature Store.
-2. Split chronologically, aligned to season boundaries (see chronological_split).
-3. Train + evaluate ALL 7 models, deliberately ordered to match the brief's
-   "from statistical modelling to deep learning" spectrum:
-   Persistence baseline -> Prophet (classical statistical) -> Ridge ->
-   Random Forest -> XGBoost -> LightGBM -> LSTM -> GRU (deep learning).
-4. Use TimeSeriesSplit for all cross-validation (never shuffle time-series data),
-   with Optuna driving the hyperparameter search for each tabular model.
-5. Evaluate the winning TABULAR model two extra ways for the report:
-   - stratified by season (smog vs. normal) — proves it works when it matters most
-   - by forecast horizon (24h/48h/72h) — shows how accuracy degrades further out
-6. Run SHAP on the best tree-based model for explainability.
-7. Push the best-performing TABULAR 72h model to the Hopsworks Model Registry.
+For each horizon in config.TARGET_HORIZONS (24h / 48h / 72h = day 1 / 2 / 3):
+1. Train + Optuna-tune tabular models on aqi_delta_{h}h
+2. Train Prophet on absolute aqi (level series), fitted through end of val
+3. Train LSTM/GRU on delta; reconstruct absolute for metrics
+4. Add a shrunk variant of every delta model, with the shrinkage factor fitted
+   on VALIDATION (0 = persistence, 1 = raw model)
+5. Build simple mean ensembles on reconstructed absolute predictions
+6. Compare everyone to that horizon's persistence baseline (RMSE+MAE+R2)
+7. Register ONLY the single best model that beats persistence on all 3
+   metrics, as aqi_forecaster_{h}h
 
-IMPORTANT — why Prophet/LSTM/GRU are compared but not registered/served:
-Prophet takes a `ds` (date) column and forecasts by date; LSTM/GRU take a
-windowed 3D input (samples, timesteps, features) built by their own
-make_sequences(). The tabular models (Ridge/RandomForest/XGBoost/LightGBM)
-take a flat 2D row instead — which is what api/main.py's single-row /predict
-endpoint is built around. So: all 7 appear in the comparison table
-(results_df), but only a tabular model is ever selected for the Model
-Registry / FastAPI serving path. This is a deliberate, documented scope
-boundary, not an oversight.
+Set config.TRAIN_START_DATE to train on the recent regime only.
+SHAP runs on the winning tree model per horizon when applicable.
 """
+from __future__ import annotations
+
 import os
+
+import joblib
 import numpy as np
 import pandas as pd
 import shap
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.ensemble import RandomForestRegressor  # used only by multi_horizon_comparison's quick untuned check
 
 from src import config
+from src.utils.evaluation import (
+    evaluate,
+    fit_delta_shrinkage,
+    persistence_baseline,
+    reconstruct_absolute,
+    pick_best_candidate,
+)
 from src.utils.hopsworks_utils import get_feature_store, get_model_registry
 from src.utils.optuna_tuning import tune_ridge, tune_random_forest, tune_xgboost, tune_lightgbm
+from src.train_prophet import train_prophet_model
+from src.train_lstm import train_lstm_model
+from src.train_gru import train_gru_model
 
-TARGET_COL = "aqi_target_72h"  # primary target — the project's headline 3-day forecast
-ALL_TARGET_COLS = [f"aqi_target_{h}h" for h in config.TARGET_HORIZONS]
-DROP_COLS = ["timestamp"] + ALL_TARGET_COLS  # never feed target columns in as features
 TABULAR_MODEL_NAMES = {"Ridge", "RandomForest", "XGBoost", "LightGBM"}
-TREE_MODEL_NAMES = {"RandomForest", "XGBoost", "LightGBM"}  # TreeSHAP-compatible
+TREE_MODEL_NAMES = {"RandomForest", "XGBoost", "LightGBM"}
+# /predict feeds one flat feature row: Prophet needs a `ds` series and the
+# recurrent nets need a 24-hour window, so neither can be served through it.
+SERVEABLE_KINDS = {"tabular", "ensemble"}
 
 
 def load_training_data() -> pd.DataFrame:
+    """
+    Read the feature group, minus rows whose targets aren't known yet.
+
+    The hourly pipeline writes each hour as soon as its features are complete,
+    which is ~72h before its targets can exist, so the newest rows in the store
+    legitimately carry NULL targets. They're the rows inference reads; for
+    training they'd be NaN labels, so drop them here at the boundary rather
+    than letting each model discover them differently.
+    """
     fs = get_feature_store()
-    fg = fs.get_feature_group(name=config.FEATURE_GROUP_NAME,
-                               version=config.FEATURE_GROUP_VERSION)
-    return fg.read()
+    fg = fs.get_feature_group(
+        name=config.FEATURE_GROUP_NAME,
+        version=config.FEATURE_GROUP_VERSION,
+    )
+    df = fg.read()
+
+    target_cols = [
+        c for h in config.TARGET_HORIZONS
+        for c in (f"aqi_target_{h}h", f"aqi_delta_{h}h")
+    ]
+    present = [c for c in target_cols if c in df.columns]
+    before = len(df)
+    df = df.dropna(subset=present).reset_index(drop=True)
+    if before != len(df):
+        print(
+            f"[training_pipeline] Dropped {before - len(df)} row(s) whose "
+            f"targets are still in the future ({len(df)} trainable rows)."
+        )
+    return df
 
 
-# ---------------------------------------------------------------------------
-# Splitting
-# ---------------------------------------------------------------------------
+def feature_columns(df: pd.DataFrame) -> list[str]:
+    """Drop timestamp + all absolute/delta target columns from model inputs."""
+    drop = {"timestamp"}
+    for h in config.TARGET_HORIZONS:
+        drop.add(f"aqi_target_{h}h")
+        drop.add(f"aqi_delta_{h}h")
+    # Raw hour/month are redundant with cyclical encodings (kept historically)
+    drop.update({"hour", "month", "openweather_aqi_category"})
+    return [c for c in df.columns if c not in drop]
+
 
 def _snap_to_june_first(ts: pd.Timestamp) -> pd.Timestamp:
-    """Most recent 1-June on or before `ts`. Used so every partition boundary
-    falls mid-year, never inside Lahore's Oct-Jan smog season."""
     year = ts.year if (ts.month, ts.day) >= (6, 1) else ts.year - 1
     return pd.Timestamp(year=year, month=6, day=1)
 
 
 def chronological_split_by_fraction(df: pd.DataFrame, train_frac=0.7, val_frac=0.15):
-    """Simple percentage-based fallback split — NEVER shuffles time-series
-    data, but doesn't guarantee full seasons per partition. Used automatically
-    when there isn't enough history for the season-aligned split below."""
     df = df.sort_values("timestamp").reset_index(drop=True)
     n = len(df)
     train_end = int(n * train_frac)
@@ -76,19 +105,7 @@ def chronological_split_by_fraction(df: pd.DataFrame, train_frac=0.7, val_frac=0
 
 
 def chronological_split(df: pd.DataFrame):
-    """
-    Season-aligned chronological split (the project's final decision):
-    - Test  = most recent ~1 year, boundary snapped to 1 June
-    - Val   = the 1 year before that
-    - Train = everything older
-
-    Snapping to 1 June (not 1 Jan) means every partition is a clean
-    June-to-June block, so smog season (Oct-Jan) always sits safely in the
-    middle of a partition instead of being split across two of them.
-
-    Falls back to a plain 70/15/15 split if there isn't at least ~2 years of
-    data yet (e.g. while testing the pipeline with a short backfill).
-    """
+    """Season-aligned June→June chronological split (smog season stays intact)."""
     df = df.sort_values("timestamp").reset_index(drop=True)
     max_date = df["timestamp"].max()
 
@@ -100,235 +117,383 @@ def chronological_split(df: pd.DataFrame):
     test_df = df[df["timestamp"] >= test_start]
 
     if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
-        print("[training_pipeline] Not enough history yet for a season-aligned "
-              "split — falling back to a simple 70/15/15 split.")
+        print("[training_pipeline] Not enough history for season-aligned split "
+              "- falling back to 70/15/15.")
         return chronological_split_by_fraction(df)
 
-    if len(train_df) < 180 * 24:  # less than ~6 months of hourly rows
-        print(f"[training_pipeline] WARNING: train set is only {len(train_df)} rows "
-              f"(~{len(train_df) // 24} days) — the season-aligned split reserves a "
-              f"fixed 2 years for val+test, so with under ~4 years of total "
-              f"history, train can end up small or miss a full smog season. "
-              f"Backfill more history if possible (config.DATA_START_DATE).")
-
-    print(f"[training_pipeline] Season-aligned split — "
-          f"train: {df['timestamp'].min().date()} to {val_start.date()}, "
-          f"val: {val_start.date()} to {test_start.date()}, "
-          f"test: {test_start.date()} to {max_date.date()}")
-    return (train_df.reset_index(drop=True), val_df.reset_index(drop=True),
-            test_df.reset_index(drop=True))
+    print(
+        f"[training_pipeline] Season-aligned split - "
+        f"train: {df['timestamp'].min().date()} to {val_start.date()}, "
+        f"val: {val_start.date()} to {test_start.date()}, "
+        f"test: {test_start.date()} to {max_date.date()}"
+    )
+    return (
+        train_df.reset_index(drop=True),
+        val_df.reset_index(drop=True),
+        test_df.reset_index(drop=True),
+    )
 
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
+SHRUNK_SUFFIX = "_shrunk"
 
-def evaluate(y_true, y_pred, name: str) -> dict:
-    return {
-        "model": name,
-        "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-        "MAE": float(mean_absolute_error(y_true, y_pred)),
-        "R2": float(r2_score(y_true, y_pred)),
+
+def _ensemble_mean(pred_arrays: list[np.ndarray], name: str, y_true) -> tuple[np.ndarray, dict]:
+    stacked = np.vstack(pred_arrays)
+    mean_pred = stacked.mean(axis=0)
+    return mean_pred, evaluate(y_true, mean_pred, name)
+
+
+def _add_delta_candidate(
+    candidates: dict,
+    results: list[dict],
+    *,
+    name: str,
+    kind: str,
+    model,
+    horizon: int,
+    val_delta_pred,
+    val_anchor,
+    val_absolute_true,
+    test_delta_pred,
+    test_anchor,
+    test_absolute_true,
+) -> None:
+    """
+    Score one delta model on reconstructed absolute AQI and, when enabled, add
+    a second candidate whose delta is shrunk by a factor fitted on validation.
+
+    Both variants share the same fitted model — only the multiplier applied to
+    its predicted delta differs, so the shrunk variant costs no extra training.
+    """
+    raw_pred = reconstruct_absolute(test_anchor, test_delta_pred)
+    metrics = evaluate(test_absolute_true, raw_pred, name)
+    metrics["horizon_hours"] = horizon
+    metrics["shrinkage"] = 1.0
+    results.append(metrics)
+    candidates[name] = {
+        "model": model,
+        "kind": kind,
+        "shrinkage": 1.0,
+        "abs_pred": raw_pred,
+        "metrics": metrics,
+    }
+
+    if not config.USE_DELTA_SHRINKAGE or val_delta_pred is None:
+        return
+
+    lam, diag = fit_delta_shrinkage(val_anchor, val_absolute_true, val_delta_pred)
+    print(
+        f"[training_pipeline] {name} {horizon}h shrinkage fitted on val: "
+        f"lambda={lam:.2f} (val RMSE {diag['val_rmse']:.2f} vs persistence "
+        f"{diag['val_persistence_rmse']:.2f})"
+    )
+    # lambda == 1 duplicates the raw row; lambda == 0 is exactly persistence,
+    # which can never pass a strictly-better gate.
+    if lam <= 0.0 or lam >= 1.0:
+        return
+
+    shrunk_name = f"{name}{SHRUNK_SUFFIX}"
+    shrunk_pred = reconstruct_absolute(test_anchor, test_delta_pred, lam)
+    shrunk_metrics = evaluate(test_absolute_true, shrunk_pred, shrunk_name)
+    shrunk_metrics["horizon_hours"] = horizon
+    shrunk_metrics["shrinkage"] = lam
+    results.append(shrunk_metrics)
+    candidates[shrunk_name] = {
+        "model": model,
+        "kind": kind,
+        "shrinkage": lam,
+        "abs_pred": shrunk_pred,
+        "metrics": shrunk_metrics,
     }
 
 
-def persistence_baseline(test_df: pd.DataFrame, target_col: str = TARGET_COL) -> dict:
-    """'AQI in N hours = AQI right now' — every real model must beat this."""
-    y_true = test_df[target_col]
-    y_pred = test_df["aqi"]
-    return evaluate(y_true, y_pred, "Persistence Baseline")
+def _build_artifact(winner: dict, candidates: dict, results: list[dict],
+                    baseline: dict, feature_cols: list[str], horizon: int) -> dict | None:
+    """
+    Turn the winning comparison row into a registry artifact.
+
+    If the overall winner can't be served through /predict (Prophet, LSTM, GRU)
+    we fall back to the best serveable candidate that still beats persistence
+    on all three metrics, and log the substitution.
+    """
+    name = winner["model"]
+    cand = candidates.get(name)
+
+    if cand is None or cand["kind"] not in SERVEABLE_KINDS:
+        serveable_rows = [
+            r for r in results
+            if candidates.get(r["model"], {}).get("kind") in SERVEABLE_KINDS
+        ]
+        fallback = pick_best_candidate(serveable_rows, baseline)
+        if fallback is None:
+            print(
+                f"[training_pipeline] Winner {name} is not serveable through "
+                f"/predict and no serveable model beat persistence — skip registry."
+            )
+            return None
+        print(
+            f"[training_pipeline] Winner {name} is not serveable through "
+            f"/predict; registering {fallback['model']} instead."
+        )
+        winner, name = fallback, fallback["model"]
+        cand = candidates[name]
+
+    return {
+        "name": name,
+        "model": cand["model"],
+        "metrics": winner,
+        "feature_cols": feature_cols,
+        "horizon": horizon,
+        "target_type": "delta",
+        "shrinkage": cand["shrinkage"],
+    }
 
 
-def stratified_evaluation(model, test_df: pd.DataFrame, feature_cols: list,
-                           target_col: str = TARGET_COL) -> pd.DataFrame:
-    """
-    Smog-season vs. normal-season metrics on the SAME trained model — proves
-    (or disproves) that it holds up during Lahore's harshest AQI period,
-    rather than hiding behind one blended number.
-    """
-    rows = []
-    for label, subset in [("Normal season", test_df[test_df["is_smog_season"] == 0]),
-                          ("Smog season", test_df[test_df["is_smog_season"] == 1]),
-                          ("Overall", test_df)]:
-        if len(subset) == 0:
+def train_one_horizon(
+    horizon: int,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_cols: list[str],
+) -> dict:
+    """Train all models for one horizon; return comparison + optional winner artifact."""
+    delta_col = f"aqi_delta_{horizon}h"
+    abs_col = f"aqi_target_{horizon}h"
+
+    baseline = persistence_baseline(test_df, abs_col)
+    baseline["horizon_hours"] = horizon
+    baseline["shrinkage"] = 0.0  # persistence IS the delta=0 prediction
+    results = [baseline]
+    candidates: dict[str, dict] = {}
+
+    X_train, y_train_delta = train_df[feature_cols], train_df[delta_col]
+    X_val = val_df[feature_cols]
+    X_test = test_df[feature_cols]
+    y_test_abs = test_df[abs_col].to_numpy(dtype=float)
+    aqi_test = test_df["aqi"].to_numpy(dtype=float)
+    aqi_val = val_df["aqi"].to_numpy(dtype=float)
+    y_val_abs = val_df[abs_col].to_numpy(dtype=float)
+
+    tscv = TimeSeriesSplit(n_splits=5)
+
+    # --- Prophet (absolute levels, fitted through end of val so it only ever
+    # forecasts `horizon` hours past its own data) ---
+    prophet_fit_df = pd.concat([train_df, val_df], ignore_index=True)
+    _, prophet_result = train_prophet_model(
+        prophet_fit_df, test_df, target_col=abs_col, horizon_hours=horizon
+    )
+    prophet_result["horizon_hours"] = horizon
+    results.append(prophet_result)
+
+    # --- Tabular on deltas ---
+    for name, tuner in [
+        ("Ridge", tune_ridge),
+        ("RandomForest", tune_random_forest),
+        ("XGBoost", tune_xgboost),
+        ("LightGBM", tune_lightgbm),
+    ]:
+        model = tuner(X_train, y_train_delta, tscv)
+        _add_delta_candidate(
+            candidates, results,
+            name=name, kind="tabular", model=model, horizon=horizon,
+            val_delta_pred=model.predict(X_val),
+            val_anchor=aqi_val,
+            val_absolute_true=y_val_abs,
+            test_delta_pred=model.predict(X_test),
+            test_anchor=aqi_test,
+            test_absolute_true=y_test_abs,
+        )
+
+    # --- LSTM / GRU on deltas (windowed, so their preds are seq_len-1 rows
+    # shorter than the tabular ones and stay out of the ensembles) ---
+    for name, trainer in [("LSTM", train_lstm_model), ("GRU", train_gru_model)]:
+        model, _, meta = trainer(
+            train_df, val_df, test_df, feature_cols, delta_col,
+            absolute_target_col=abs_col, report_name=name,
+        )
+        _add_delta_candidate(
+            candidates, results,
+            name=name, kind="recurrent", model=(model, meta), horizon=horizon,
+            val_delta_pred=meta["val_delta_pred"],
+            val_anchor=meta["val_anchor"],
+            val_absolute_true=meta["val_absolute_true"],
+            test_delta_pred=meta["test_delta_pred"],
+            test_anchor=meta["test_anchor"],
+            test_absolute_true=meta["test_absolute_true"],
+        )
+
+    # --- Ensembles over the tabular candidates (raw and shrunk both eligible) ---
+    tabular_ranked = [
+        name for name, c in sorted(
+            candidates.items(), key=lambda kv: kv[1]["metrics"]["RMSE"]
+        )
+        if c["kind"] == "tabular"
+    ]
+    # One variant per base model, so an ensemble can't be three copies of XGBoost
+    seen_bases, members_top = set(), []
+    for name in tabular_ranked:
+        base = name.removesuffix(SHRUNK_SUFFIX)
+        if base in seen_bases:
             continue
-        preds = model.predict(subset[feature_cols])
-        result = evaluate(subset[target_col], preds, label)
-        result["n_rows"] = len(subset)
-        rows.append(result)
-    return pd.DataFrame(rows)
+        seen_bases.add(base)
+        members_top.append(name)
+        if len(members_top) == 3:
+            break
+
+    for ens_name, members in [
+        (f"Ensemble_top{len(members_top)}_tabular", members_top),
+        ("Ensemble_XGB_LGBM", [n for n in tabular_ranked
+                               if n.removesuffix(SHRUNK_SUFFIX) in {"XGBoost", "LightGBM"}][:2]),
+    ]:
+        if len(members) < 2 or ens_name in candidates:
+            continue
+        ens_pred, ens_metrics = _ensemble_mean(
+            [candidates[m]["abs_pred"] for m in members], ens_name, y_test_abs
+        )
+        ens_metrics["horizon_hours"] = horizon
+        ens_metrics["shrinkage"] = float(
+            np.mean([candidates[m]["shrinkage"] for m in members])
+        )
+        results.append(ens_metrics)
+        candidates[ens_name] = {
+            "model": {
+                "type": "mean_ensemble",
+                "members": {
+                    m: {"model": candidates[m]["model"],
+                        "shrinkage": candidates[m]["shrinkage"]}
+                    for m in members
+                },
+            },
+            "kind": "ensemble",
+            "shrinkage": 1.0,  # each member already carries its own factor
+            "abs_pred": ens_pred,
+            "metrics": ens_metrics,
+        }
+
+    results_df = pd.DataFrame(results).sort_values("RMSE")
+    print(f"\n=== Horizon {horizon}h (day {horizon // 24}) — all models ===")
+    print(results_df.to_string(index=False))
+    results_df.to_csv(f"reports/model_comparison_{horizon}h.csv", index=False)
+
+    winner = pick_best_candidate(results, baseline)
+    artifact = None
+    if winner is None:
+        print(
+            f"[training_pipeline] No model beat persistence on all 3 metrics "
+            f"for {horizon}h — nothing registered."
+        )
+    else:
+        print(
+            f"[training_pipeline] Winner for {horizon}h: {winner['model']} "
+            f"(RMSE={winner['RMSE']:.2f}, MAE={winner['MAE']:.2f}, R2={winner['R2']:.3f})"
+        )
+        artifact = _build_artifact(winner, candidates, results, baseline,
+                                  feature_cols, horizon)
+
+        if artifact and artifact["name"].removesuffix(SHRUNK_SUFFIX) in TREE_MODEL_NAMES:
+            explain_with_shap(
+                artifact["model"],
+                X_test,
+                artifact["name"].removesuffix(SHRUNK_SUFFIX),
+                out_path=f"reports/shap_summary_{horizon}h.png",
+            )
+
+    return {
+        "horizon": horizon,
+        "results_df": results_df,
+        "baseline": baseline,
+        "winner": winner,
+        "artifact": artifact,
+    }
 
 
-def multi_horizon_comparison(train_df: pd.DataFrame, test_df: pd.DataFrame,
-                              feature_cols: list) -> pd.DataFrame:
-    """
-    Quick (untuned) Random Forest per horizon, purely to show how accuracy
-    degrades from 24h -> 48h -> 72h. This is intentionally lightweight
-    (no Optuna tuning) — it's a supplementary comparison table for the
-    report, not the model that gets registered (TARGET_COL / 72h uses the
-    fully tuned model from train_and_evaluate() for that).
-    """
-    rows = []
-    for h in config.TARGET_HORIZONS:
-        target_col = f"aqi_target_{h}h"
-        model = RandomForestRegressor(n_estimators=300, max_depth=10, random_state=42)
-        model.fit(train_df[feature_cols], train_df[target_col])
-        preds = model.predict(test_df[feature_cols])
-        result = evaluate(test_df[target_col], preds, f"RandomForest ({h}h ahead)")
-        result["horizon_hours"] = h
-        rows.append(result)
-    return pd.DataFrame(rows)
+def explain_with_shap(model, X_test, model_name: str, max_samples: int = 2000,
+                      out_path: str = "reports/shap_summary.png"):
+    if model_name not in TREE_MODEL_NAMES:
+        return
+    X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42)
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_sample)
+    shap.summary_plot(shap_values, X_sample, show=False)
+    import matplotlib.pyplot as plt
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    print(f"[training_pipeline] SHAP saved to {out_path}")
 
 
-# ---------------------------------------------------------------------------
-# Main training + evaluation
-# ---------------------------------------------------------------------------
+def register_model(artifact: dict):
+    """Register one horizon winner to Hopsworks Model Registry."""
+    horizon = artifact["horizon"]
+    name = artifact["name"]
+    metrics = artifact["metrics"]
+    model_registry_name = config.model_name_for_horizon(horizon)
+
+    os.makedirs("model_artifact", exist_ok=True)
+    shrinkage = float(artifact.get("shrinkage", 1.0))
+    payload = {
+        "model": artifact["model"],
+        "feature_cols": artifact["feature_cols"],
+        "horizon_hours": horizon,
+        "target_type": artifact.get("target_type", "delta"),
+        "model_name": name,
+        # Serving must apply the same factor training scored with, or the
+        # served prediction won't match the registered metrics.
+        "shrinkage": shrinkage,
+    }
+    model_path = f"model_artifact/{model_registry_name}.joblib"
+    joblib.dump(payload, model_path)
+
+    mr = get_model_registry()
+    hw_model = mr.python.create_model(
+        name=model_registry_name,
+        metrics={
+            "RMSE": metrics["RMSE"],
+            "MAE": metrics["MAE"],
+            "R2": metrics["R2"],
+        },
+        description=(
+            f"AQI {horizon}h (day {horizon // 24}) forecaster — {name} "
+            f"(delta target, serve as aqi + {shrinkage:.2f} * predicted_delta)"
+        ),
+    )
+    hw_model.save("model_artifact")
+    print(
+        f"[training_pipeline] Registered {name} as {model_registry_name} "
+        f"(RMSE={metrics['RMSE']:.2f})"
+    )
+
 
 def train_and_evaluate():
     os.makedirs("reports", exist_ok=True)
 
     df = load_training_data()
-    df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize(None)
+    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+
+    if config.TRAIN_START_DATE:
+        cutoff = pd.Timestamp(config.TRAIN_START_DATE)
+        before = len(df)
+        df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
+        print(
+            f"[training_pipeline] TRAIN_START_DATE={cutoff.date()} — using the "
+            f"recent regime only: {len(df)} of {before} rows."
+        )
 
     train_df, val_df, test_df = chronological_split(df)
+    feature_cols = feature_columns(df)
 
-    feature_cols = [c for c in df.columns if c not in DROP_COLS]
-    X_train, y_train = train_df[feature_cols], train_df[TARGET_COL]
-    X_test, y_test = test_df[feature_cols], test_df[TARGET_COL]
+    all_results = []
+    for h in config.TARGET_HORIZONS:
+        out = train_one_horizon(h, train_df, val_df, test_df, feature_cols)
+        out["results_df"]["horizon_hours"] = h
+        all_results.append(out["results_df"])
+        if out["artifact"] is not None:
+            register_model(out["artifact"])
 
-    tscv = TimeSeriesSplit(n_splits=5)
-    results = [persistence_baseline(test_df)]
-    fitted_models = {}
-
-    # --- Prophet (classical statistical modelling — see train_prophet.py for
-    # why this is placed first, right after the baseline: it's the actual
-    # "statistical" end of the brief's requested statistical-to-deep-learning
-    # spectrum, ahead of the regression-on-features models below). ---
-    from src.train_prophet import train_prophet_model
-    _, prophet_result = train_prophet_model(train_df, test_df)
-    results.append(prophet_result)
-
-    # --- Ridge ---
-    ridge_model = tune_ridge(X_train, y_train, tscv)
-    fitted_models["Ridge"] = ridge_model
-    results.append(evaluate(y_test, ridge_model.predict(X_test), "Ridge"))
-
-    # --- Random Forest ---
-    rf_model = tune_random_forest(X_train, y_train, tscv)
-    fitted_models["RandomForest"] = rf_model
-    results.append(evaluate(y_test, rf_model.predict(X_test), "RandomForest"))
-
-    # --- XGBoost ---
-    xgb_model = tune_xgboost(X_train, y_train, tscv)
-    fitted_models["XGBoost"] = xgb_model
-    results.append(evaluate(y_test, xgb_model.predict(X_test), "XGBoost"))
-
-    # --- LightGBM ---
-    lgb_model = tune_lightgbm(X_train, y_train, tscv)
-    fitted_models["LightGBM"] = lgb_model
-    results.append(evaluate(y_test, lgb_model.predict(X_test), "LightGBM"))
-
-    # --- LSTM & GRU (comparison-only — see module docstring for why these
-    # aren't candidates for fitted_models / the Model Registry: they need a
-    # windowed 3D input, incompatible with the flat-row serving path the
-    # tabular models above share with api/main.py). ---
-    from src.train_lstm import train_lstm_model
-    from src.train_gru import train_gru_model
-
-    _, lstm_result = train_lstm_model(train_df, val_df, test_df, feature_cols, TARGET_COL)
-    results.append(lstm_result)
-
-    _, gru_result = train_gru_model(train_df, val_df, test_df, feature_cols, TARGET_COL)
-    results.append(gru_result)
-
-    results_df = pd.DataFrame(results).sort_values("RMSE")
-    print("\n=== Model comparison — ALL 7 MODELS (72h-ahead target) ===")
-    print(results_df.to_string(index=False))
-    results_df.to_csv("reports/model_comparison.csv", index=False)
-
-    overall_best_name = results_df.iloc[0]["model"]
-
-    # Registration/serving candidate is chosen from TABULAR models only —
-    # see module docstring. If a sequence model actually scored lower RMSE
-    # than every tabular model, say so plainly rather than silently ignoring it.
-    tabular_results_df = results_df[results_df["model"].isin(TABULAR_MODEL_NAMES)]
-    if tabular_results_df.empty:
-        print("WARNING: no tabular model available to register — check the run.")
-        return
-
-    best_name = tabular_results_df.iloc[0]["model"]
-    best_metrics = tabular_results_df.iloc[0].to_dict()
-    if overall_best_name not in TABULAR_MODEL_NAMES and overall_best_name != "Persistence Baseline":
-        print(f"\nNOTE: {overall_best_name} scored the lowest RMSE overall, but "
-              f"isn't served (see module docstring) — registering the best "
-              f"TABULAR model instead: {best_name}.")
-
-    baseline_rmse = next(r["RMSE"] for r in results if r["model"] == "Persistence Baseline")
-    if best_metrics["RMSE"] >= baseline_rmse:
-        print(f"WARNING: best tabular model ({best_name}, RMSE={best_metrics['RMSE']:.2f}) "
-              f"did not beat the persistence baseline (RMSE={baseline_rmse:.2f}) — "
-              f"revisit features before registering.")
-        return
-
-    best_model = fitted_models[best_name]
-
-    # --- Stratified (smog vs. normal season) evaluation ---
-    strat_df = stratified_evaluation(best_model, test_df, feature_cols)
-    print(f"\n=== Stratified evaluation ({best_name}) ===")
-    print(strat_df.to_string(index=False))
-    strat_df.to_csv("reports/model_comparison_stratified.csv", index=False)
-
-    # --- Multi-horizon (24h/48h/72h) comparison ---
-    horizon_df = multi_horizon_comparison(train_df, test_df, feature_cols)
-    print("\n=== Multi-horizon comparison (quick Random Forest per horizon) ===")
-    print(horizon_df.to_string(index=False))
-    horizon_df.to_csv("reports/model_comparison_by_horizon.csv", index=False)
-
-    # --- Explainability + registry ---
-    explain_with_shap(best_model, X_test, best_name)
-    register_model(best_model, best_name, best_metrics, feature_cols)
-
-
-def explain_with_shap(model, X_test, model_name: str, max_samples: int = 2000):
-    """
-    TreeSHAP for tree-based models; save a summary plot for the report.
-    Sampled to at most `max_samples` rows — standard SHAP practice, and
-    necessary in practice: TreeExplainer over a full multi-year test set
-    (tens of thousands of rows) is needlessly slow for a summary plot whose
-    job is just to show overall feature-importance patterns, not explain
-    every single row.
-    """
-    if model_name in TREE_MODEL_NAMES:
-        X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42)
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_sample)
-        shap.summary_plot(shap_values, X_sample, show=False)
-        import matplotlib.pyplot as plt
-        plt.savefig("reports/shap_summary.png", bbox_inches="tight")
-        plt.close()
-        print(f"[training_pipeline] SHAP summary plot saved to reports/shap_summary.png "
-              f"(sampled {len(X_sample)} of {len(X_test)} test rows)")
-    else:
-        print(f"[training_pipeline] SHAP skipped — {model_name} isn't tree-based "
-              f"(TreeExplainer only). Use shap.LinearExplainer for Ridge if needed.")
-
-
-def register_model(model, name: str, metrics: dict, feature_cols: list):
-    import joblib
-
-    os.makedirs("model_artifact", exist_ok=True)
-    model_path = f"model_artifact/{name}.joblib"
-    joblib.dump(model, model_path)
-
-    mr = get_model_registry()
-    hw_model = mr.python.create_model(
-        name=config.MODEL_NAME,
-        metrics={"RMSE": metrics["RMSE"], "MAE": metrics["MAE"], "R2": metrics["R2"]},
-        description=f"AQI 72h forecaster — {name}",
-    )
-    hw_model.save("model_artifact")
-    print(f"[training_pipeline] Registered {name} to Hopsworks Model Registry "
-          f"(RMSE={metrics['RMSE']:.2f})")
+    combined = pd.concat(all_results, ignore_index=True)
+    combined.to_csv("reports/model_comparison.csv", index=False)
+    combined.to_csv("reports/model_comparison_by_horizon.csv", index=False)
+    print("\n=== Combined comparison (all horizons) ===")
+    print(combined.to_string(index=False))
 
 
 if __name__ == "__main__":

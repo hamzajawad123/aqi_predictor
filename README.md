@@ -28,14 +28,18 @@ Open-Meteo (weather)        ─┘   (GitHub Actions,           │
 - Both sources use the **same lat/lon** (`config.LATITUDE` / `config.LONGITUDE`, both from Lahore's coordinates) and are **normalized to UTC** before merging — see `data_fetch.py`.
 - Both start from the **same date** (`config.DATA_START_DATE`, defaults to `2020-11-27`, the start of OpenWeather's free historical archive) so the two dataframes align from row zero.
 
-**How much data:** the full available history (~5.5 years, Nov 2020–present) by default. Costs ~70 API calls total — trivial against either free tier — and gives 5+ complete smog-season cycles instead of 1–2, which is what makes a proper season-aware split possible.
+**How much data:** the full available history (~5.5 years, Nov 2020–present) is fetched and kept as the raw snapshot. **Training, however, starts at `config.TRAIN_START_DATE` (default `2025-04-04`)** — OpenWeather's archive changes character on that date: mean hourly |AQI change| collapses from ~46 to ~4.5 and never recovers, and the same break appears in PM2.5. Everything before it is effectively a different data-generating process, so models trained across the break learned a volatility the present no longer has and lost to the persistence baseline at every horizon. Restricting training to the post-break regime is what made them win. The earlier history is still fetched and stored — set `TRAIN_START_DATE=` (empty) to train on all of it and reproduce the failure.
+
+**Hourly grid is made strict before any shifting** (`feature_engineering.to_hourly_grid()`): lags, rolling windows, change rates and targets all shift by ROW POSITION, which only equals hours if no hour is missing. The raw history has ~3,700 missing hours across 415 outages, so on the gappy frame `shift(-24)` actually spanned 24 hours for only 87% of rows (up to 264 hours for the rest) — those rows were trained against the wrong future. The frame is now reindexed onto a complete hourly grid first; outages of ≤6 hours are interpolated, longer ones stay missing and those rows are dropped rather than invented. This is the difference between feature group v3 and **v4**.
 
 **The AQI target — computed, not taken from OpenWeather directly:** OpenWeather's own `main.aqi` field is NOT a continuous AQI — it's a coarse 1-5 category (1=Good ... 5=Very Poor), documented at openweathermap.org/api/air-pollution. Training regression models (RMSE/MAE/R²) against a 5-value categorical field wouldn't be meaningful, and doesn't match what "AQI" means in the brief (a continuous number, like the "82" in the brief's own example screenshot). So `aqi` throughout this project is computed from the raw PM2.5 concentration using the real **US EPA AQI formula** (`src/utils/aqi_calculation.py`), verified against the EPA's 2024-revised breakpoint table and its own published worked examples. OpenWeather's original 1-5 field is kept as a separate `openweather_aqi_category` column for reference only — never used as a feature or target. (This module also had a real bug caught during testing — a raw float like 9.0989 fell in a gap between adjacent EPA breakpoints and produced a nonsensical negative AQI; fixed by truncating to 1 decimal place first, per the official EPA method, and locked in with a regression test covering all 4001 possible truncated values from 0-400.)
 
 **Data validation** (`src/utils/data_validation.py`): runs on every merged (pollution + weather) batch, in both the hourly pipeline and backfill, BEFORE feature engineering. Checks required columns exist, drops duplicate timestamps, drops rows with nulls or out-of-range values (sensor glitches/API errors) — one bad hour is dropped, not the whole batch.
 
 **Train/val/test split — season-aligned, not a blind percentage cut:**
-`training_pipeline.chronological_split()` reserves the most recent ~1 year for test and the year before that for validation, with both boundaries snapped to **1 June** (not 1 Jan) so Lahore's Oct–Jan smog season always sits safely inside a partition instead of being cut in half at a Dec 31/Jan 1 boundary. This guarantees every partition — train, val, and test — contains a full seasonal cycle. Falls back to a simple 70/15/15 split automatically if there isn't enough history yet.
+`training_pipeline.chronological_split()` reserves the most recent ~1 year for test and the year before that for validation, with both boundaries snapped to **1 June** (not 1 Jan) so Lahore's Oct–Jan smog season always sits safely inside a partition instead of being cut in half at a Dec 31/Jan 1 boundary. This guarantees every partition — train, val, and test — contains a full seasonal cycle. Falls back to a simple 70/15/15 split automatically if there isn't enough history yet, which is the active path while the post-regime-break window is under ~2.5 years. One consequence to read honestly: the fallback's test window is a low-variance summer stretch with no smog season, which makes R² a harsh metric there (a small variance denominator can leave even the persistence baseline at a negative R²), so RMSE and MAE carry more signal than R² in that report.
+
+**Predicted deltas are shrunk toward zero by a factor fitted on validation** (`evaluation.fit_delta_shrinkage()`): λ=0 is exactly the persistence baseline and λ=1 is the untouched model, so the search interpolates between them and each delta model gets a second, shrunk candidate in the comparison at no extra training cost. It exists because predicted deltas are noisy and an over-confident delta costs the most on the many hours where AQI barely moves — the hours where persistence is near-exact. The winning λ is stored with the registered model and re-applied at serve time, so the served prediction is the one that passed the gate.
 
 **Evaluation — three layers, not just one RMSE number:**
 1. Standard RMSE/MAE/R² per model (Persistence, Prophet, Ridge, Random Forest, XGBoost, LightGBM, LSTM, GRU) → `reports/model_comparison.csv`
@@ -97,15 +101,19 @@ aqi-predictor/
 
 1. Clone the repo, open in VS Code, create a virtual environment, `pip install -r requirements.txt`.
 2. Copy `.env.example` → `.env`, fill in `OPENWEATHER_API_KEY`, `HOPSWORKS_API_KEY`, `HOPSWORKS_PROJECT_NAME` (Open-Meteo needs no key).
-3. Smoke-test: `python src/feature_pipeline.py` (hourly path) — confirms both APIs + Hopsworks connect correctly. Expected output: `"Inserted 1 row(s)"`.
-4. Backfill full history: `python src/feature_pipeline.py backfill` (no date = pulls from `DATA_START_DATE` to today). For a quick test with less data: `python src/feature_pipeline.py backfill 2025-01-01`.
-5. Create the Hopsworks Feature View (one-time, needed by the API): `python -m src.utils.hopsworks_utils`.
-6. Run `notebooks/01_eda.ipynb` — full EDA including the smog-vs-normal comparison; saves `data/eda_snapshot.parquet` for the dashboard's EDA page.
-7. Run `python src/training_pipeline.py` — trains, tunes, evaluates (overall + stratified + per-horizon), SHAP-explains, and registers the best model. Check `reports/*.csv` and `reports/shap_summary.png` afterward.
-8. Add the same keys as GitHub **Repository Secrets**; push `.github/workflows/` and confirm both scheduled workflows succeed under the Actions tab.
-9. Run locally: `uvicorn api.main:app --reload` + `streamlit run app/Home.py` — confirm the dashboard shows a real forecast.
-10. `docker compose up --build` — same check, containerized.
-11. Deploy to Hugging Face Spaces (or Streamlit Community Cloud), add the live link below, write `reports/final_report.md`, submit the repo link.
+3. **Raw snapshot (Step 1 — before EDA / FE):** `python -m src.feature_pipeline raw-snapshot`  
+   Fetches full history from both APIs, validates, and writes `data/raw/aqi_raw_merged.parquet`. No feature engineering, no Hopsworks.
+4. Run `notebooks/01_eda.ipynb` on that raw parquet. Review the **Findings for FE** section before changing feature engineering.
+5. Smoke-test hourly path (after FE is approved): `python -m src.feature_pipeline` — confirms both APIs + Hopsworks. Also upserts the raw snapshot.
+6. Push engineered features to Hopsworks FG **v4** (from the local raw snapshot, no re-fetch):  
+   `python -m src.feature_pipeline push-features`  
+   (set `FEATURE_GROUP_VERSION=4` in `.env` if needed). Leave v2/v3 untouched as rollback.
+7. Create the Hopsworks Feature View (one-time): `python -m src.utils.hopsworks_utils`.
+8. Run `python -m src.training_pipeline` — trains all 7 models **per horizon** (24/48/72), scores vs persistence, registers `aqi_forecaster_{24,48,72}h` only when a model beats baseline on RMSE+MAE+R². Check `reports/`.
+9. Add the same keys as GitHub **Repository Secrets**; push `.github/workflows/` and confirm both scheduled workflows succeed under the Actions tab.
+10. Run locally: `uvicorn api.main:app --reload` + `streamlit run app/Home.py` — `/predict` returns day 1/2/3.
+11. `docker compose up --build` — same check, containerized.
+12. Deploy to Hugging Face Spaces (or Streamlit Community Cloud), add the live link below, write `reports/final_report.md`, submit the repo link.
 
 ## Live Demo
 
