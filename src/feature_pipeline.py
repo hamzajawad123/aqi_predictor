@@ -66,6 +66,20 @@ def _cast_for_hopsworks(features_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _unix_utc(ts: pd.Timestamp) -> int:
+    """
+    UNIX seconds for OpenWeather. `.timestamp()` on a naive Timestamp is
+    treated as *local* time, which shifts the requested window by the host
+    UTC offset. Naive values here are UTC wall-clock hours, so localize
+    them before converting.
+    """
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return int(ts.timestamp())
+
+
 def _as_utc(series: pd.Series) -> pd.Series:
     """
     Normalize timestamps to UTC-aware so string/tz format cannot make two
@@ -91,7 +105,7 @@ def fetch_merged_lookback(lookback_hours: int = LOOKBACK_HOURS) -> pd.DataFrame:
     lookback_start = now_utc - pd.Timedelta(hours=lookback_hours)
 
     pollution_df = fetch_historical_air_pollution(
-        int(lookback_start.timestamp()), int(now_utc.timestamp())
+        _unix_utc(lookback_start), _unix_utc(now_utc)
     )
     weather_df = fetch_openmeteo_recent_weather(
         past_days=(lookback_hours // 24) + 2
@@ -141,15 +155,18 @@ def fetch_merged_historical(
     engineer features, and/or push to Hopsworks.
     """
     start_date = start_date or config.DATA_START_DATE
-    start_ts = pd.Timestamp(start_date)
-    end_ts = pd.Timestamp.utcnow().tz_localize(None)
+    # Same UTC rule as fetch_merged_lookback: naive .timestamp() is local time.
+    start_utc = pd.Timestamp(start_date, tz="UTC")
+    end_utc = pd.Timestamp.now(tz="UTC").floor("h")
+    start_ts = start_utc.tz_localize(None)
+    end_ts = end_utc.tz_localize(None)
 
     raw_chunks = []
-    chunk_start = start_ts
-    while chunk_start < end_ts:
-        chunk_end = min(chunk_start + pd.Timedelta(days=chunk_days), end_ts)
+    chunk_start = start_utc
+    while chunk_start < end_utc:
+        chunk_end = min(chunk_start + pd.Timedelta(days=chunk_days), end_utc)
         chunk_df = fetch_historical_air_pollution(
-            int(chunk_start.timestamp()), int(chunk_end.timestamp())
+            _unix_utc(chunk_start), _unix_utc(chunk_end)
         )
         if not chunk_df.empty:
             raw_chunks.append(chunk_df)

@@ -28,6 +28,8 @@ jobs:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
-          FEATURE_GROUP_VERSION: ${{ secrets.FEATURE_GROUP_VERSION }}
+          # Pin here — this is not a secret. An old FEATURE_GROUP_VERSION
+          # repo secret was sending inserts into a pre-delta group.
+          FEATURE_GROUP_VERSION: "4"
           FEATURE_VIEW_NAME: ${{ secrets.FEATURE_VIEW_NAME }}
         run: python -m src.feature_pipeline

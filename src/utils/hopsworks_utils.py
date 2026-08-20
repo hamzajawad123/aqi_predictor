@@ -23,15 +23,50 @@ def get_feature_store():
     return project.get_feature_store()
 
 
+def _feature_names(fg) -> set[str]:
+    feats = getattr(fg, "features", None) or []
+    return {str(f.name).lower() for f in feats}
+
+
 def get_or_create_feature_group(fs, df_for_schema=None):
+    """
+    Open FEATURE_GROUP_NAME @ FEATURE_GROUP_VERSION.
+
+    An existing group keeps its original schema — Hopsworks will not add
+    columns on insert. Hourly CI used to point at a pre-delta version
+    (via a GitHub secret), then fail when aqi_delta_{24,48,72}h were new.
+    If this group already has columns but is missing those deltas, fail
+    here with a clear version message instead of a schema traceback.
+    A brand-new group has an empty feature list; the first insert sets it
+    from the caller's frame (`df_for_schema` is that frame).
+    """
+    print(
+        f"[hopsworks] Feature group {config.FEATURE_GROUP_NAME} "
+        f"v{config.FEATURE_GROUP_VERSION}"
+    )
     fg = fs.get_or_create_feature_group(
         name=config.FEATURE_GROUP_NAME,
         version=config.FEATURE_GROUP_VERSION,
         description="Hourly AQI + weather features for Lahore",
         primary_key=["timestamp"],
         event_time="timestamp",
-        time_travel_format="HUDI", 
+        time_travel_format="HUDI",
     )
+    names = _feature_names(fg)
+    if names:
+        required = [f"aqi_delta_{h}h" for h in config.TARGET_HORIZONS]
+        missing = [c for c in required if c.lower() not in names]
+        if missing:
+            raise RuntimeError(
+                f"{config.FEATURE_GROUP_NAME} v{config.FEATURE_GROUP_VERSION} "
+                f"is missing {missing}. That version was created before delta "
+                f"targets, and Hopsworks cannot add columns on insert. Set "
+                f"FEATURE_GROUP_VERSION to the current group (default 4) or "
+                f"a new unused version, then run "
+                f"`python -m src.feature_pipeline push-features` so the "
+                f"schema includes aqi_delta_{{24,48,72}}h. Leave older "
+                f"versions as rollback."
+            )
     return fg
 
 

@@ -1,7 +1,7 @@
 """
-EDA page — reads the local snapshot exported by notebooks/01_eda.ipynb
-(data/eda_snapshot.parquet) rather than querying Hopsworks on every page
-load, so the dashboard stays fast.
+EDA page — reads the local raw merged snapshot written by
+`python -m src.feature_pipeline raw-snapshot` (and upserted hourly)
+rather than querying Hopsworks on every page load, so the dashboard stays fast.
 """
 import os
 import pandas as pd
@@ -11,17 +11,21 @@ import streamlit as st
 st.set_page_config(page_title="EDA · AQI Predictor", page_icon="📊", layout="wide")
 st.title("📊 Exploratory Data Analysis")
 
-SNAPSHOT_PATH = "data/eda_snapshot.parquet"
+SNAPSHOT_PATHS = (
+    "data/raw/aqi_raw_merged.parquet",
+    "data/eda_snapshot.parquet",  # legacy export from older notebook runs
+)
 
-if not os.path.exists(SNAPSHOT_PATH):
+snapshot_path = next((p for p in SNAPSHOT_PATHS if os.path.exists(p)), None)
+
+if snapshot_path is None:
     st.warning(
-        f"No EDA snapshot found at `{SNAPSHOT_PATH}`. Run "
-        "`notebooks/01_eda.ipynb` once (it saves this file automatically) "
-        "after you've backfilled historical data."
+        "No raw AQI snapshot found. Run `python -m src.feature_pipeline raw-snapshot` "
+        "to write `data/raw/aqi_raw_merged.parquet`."
     )
     st.stop()
 
-df = pd.read_parquet(SNAPSHOT_PATH)
+df = pd.read_parquet(snapshot_path)
 
 st.subheader("AQI over time")
 st.plotly_chart(px.line(df, x="timestamp", y="aqi", title="AQI — Lahore"),
@@ -38,9 +42,7 @@ with col2:
         st.plotly_chart(px.scatter(df, x="wind_speed", y="aqi", opacity=0.4),
                          use_container_width=True)
     else:
-        st.info("wind_speed not in snapshot yet — available once the hourly "
-                 "feature pipeline has been running (weather isn't in the "
-                 "free historical backfill).")
+        st.info("wind_speed is missing from this snapshot — re-run `raw-snapshot`.")
 
 st.subheader("Correlation heatmap")
 numeric_df = df.select_dtypes(include="number")

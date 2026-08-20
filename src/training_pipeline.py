@@ -408,7 +408,7 @@ def train_one_horizon(
 
 
 def explain_with_shap(model, X_test, model_name: str, max_samples: int = 2000,
-                      out_path: str = "reports/shap_summary.png"):
+                      out_path: str = "reports/shap_summary_72h.png"):
     if model_name not in TREE_MODEL_NAMES:
         return
     X_sample = X_test.sample(n=min(max_samples, len(X_test)), random_state=42)

@@ -27,7 +27,7 @@ jobs:
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
-          FEATURE_GROUP_VERSION: ${{ secrets.FEATURE_GROUP_VERSION }}
+          FEATURE_GROUP_VERSION: "4"
           FEATURE_VIEW_NAME: ${{ secrets.FEATURE_VIEW_NAME }}
         run: python -m src.training_pipeline
 
@@ -36,7 +36,9 @@ jobs:
         with:
           name: training-report-${{ github.run_number }}
           path: |
-            reports/shap_summary.png
+            reports/shap_summary_24h.png
+            reports/shap_summary_48h.png
+            reports/shap_summary_72h.png
             reports/lstm_loss_curve.png
             reports/gru_loss_curve.png
             reports/model_comparison.csv
