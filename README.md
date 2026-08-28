@@ -53,11 +53,7 @@ Default location in `src/config.py` / `.env.example`: **Lahore**, latitude `31.5
 
 ## Live app
 
-You can see the dashboard from here:
-
-```markdown
-[Open dashboard](https://YOUR-APP.streamlit.app)
-```
+[Open dashboard](https://lahore-aqi-predictor.streamlit.app)
 
 ---
 
@@ -450,7 +446,7 @@ Hopsworks must already contain features and registered models for forecasts to a
 
 ## Docker
 
-You can run this project from **Docker images** instead of installing Python packages on your machine. The images are defined in [`api/Dockerfile`](api/Dockerfile) (FastAPI, port 8000) and [`app/Dockerfile`](app/Dockerfile) (Streamlit, port 8501). Both start from `python:3.11-slim`.
+You can run this project from **Docker images** instead of installing Python packages on your machine. The images are defined in `[api/Dockerfile](api/Dockerfile)` (FastAPI, port 8000) and `[app/Dockerfile](app/Dockerfile)` (Streamlit, port 8501). Both start from `python:3.11-slim`.
 
 A published Docker Hub image name is **not recorded** in this repository, so there is no `docker pull user/name` URL to copy yet. The procedure below **builds the images from this repo**, then runs them. You still need Docker Desktop (Windows/macOS) or Docker Engine + Compose, a clone of the repo, and a root `.env` (Hopsworks keys at minimum for the dashboard).
 
@@ -473,10 +469,12 @@ docker compose up --build
 
 This builds both images and starts both containers. The first run downloads `python:3.11-slim` if it is not already on your machine.
 
-| Service | Container name | Host port | Image command |
-| ------- | -------------- | --------- | ------------- |
-| `api`   | `aqi_api`      | **8000**  | `uvicorn api.main:app --host 0.0.0.0 --port 8000` |
+
+| Service | Container name | Host port | Image command                                                           |
+| ------- | -------------- | --------- | ----------------------------------------------------------------------- |
+| `api`   | `aqi_api`      | **8000**  | `uvicorn api.main:app --host 0.0.0.0 --port 8000`                       |
 | `app`   | `aqi_app`      | **8501**  | `streamlit run app/Home.py --server.port=8501 --server.address=0.0.0.0` |
+
 
 Compose sets `API_BASE_URL=http://api:8000` on the `app` service. `app/Home.py` currently does not use that variable.
 
@@ -503,6 +501,8 @@ Stop and remove the containers:
 ```bash
 docker compose down
 ```
+
+
 
 ### Option B — Build and run the images yourself
 
@@ -750,27 +750,27 @@ aqi_predictor/
 ## Common commands
 
 
-| Command                                         | What it does                       |
-| ----------------------------------------------- | ---------------------------------- |
-| `python -m pip install -r app/requirements.txt` | Dashboard dependencies             |
-| `python -m pip install -r api/requirements.txt` | API dependencies                   |
-| `python -m pip install -r requirements.txt`     | Full training + notebooks + pytest |
-| `streamlit run app/Home.py`                     | Start dashboard                    |
-| `uvicorn api.main:app --reload`                 | Start API on port 8000             |
-| `python -m src.feature_pipeline raw-snapshot`   | Local raw parquet                  |
-| `python -m src.feature_pipeline push-features`  | Features → Hopsworks               |
-| `python -m src.utils.hopsworks_utils`           | Create feature view                |
-| `python -m src.feature_pipeline`                | Hourly feature job                 |
-| `python -m src.feature_pipeline backfill`       | Historical Hopsworks insert        |
-| `python -m src.training_pipeline`               | Train and maybe register           |
-| `docker compose up --build`                     | Build images from this repo and start API + dashboard |
-| `docker compose up --build -d`                  | Same, detached                     |
-| `docker compose down`                           | Stop Compose stack                 |
-| `docker build -f api/Dockerfile -t aqi-api:local .` | Build API image                |
-| `docker build -f app/Dockerfile -t aqi-app:local .` | Build dashboard image          |
-| `docker run --rm --env-file .env -p 8501:8501 aqi-app:local` | Run dashboard image |
-| `docker run --rm --env-file .env -p 8000:8000 aqi-api:local` | Run API image |
-| `pytest tests/`                                 | Run tests                          |
+| Command                                                      | What it does                                          |
+| ------------------------------------------------------------ | ----------------------------------------------------- |
+| `python -m pip install -r app/requirements.txt`              | Dashboard dependencies                                |
+| `python -m pip install -r api/requirements.txt`              | API dependencies                                      |
+| `python -m pip install -r requirements.txt`                  | Full training + notebooks + pytest                    |
+| `streamlit run app/Home.py`                                  | Start dashboard                                       |
+| `uvicorn api.main:app --reload`                              | Start API on port 8000                                |
+| `python -m src.feature_pipeline raw-snapshot`                | Local raw parquet                                     |
+| `python -m src.feature_pipeline push-features`               | Features → Hopsworks                                  |
+| `python -m src.utils.hopsworks_utils`                        | Create feature view                                   |
+| `python -m src.feature_pipeline`                             | Hourly feature job                                    |
+| `python -m src.feature_pipeline backfill`                    | Historical Hopsworks insert                           |
+| `python -m src.training_pipeline`                            | Train and maybe register                              |
+| `docker compose up --build`                                  | Build images from this repo and start API + dashboard |
+| `docker compose up --build -d`                               | Same, detached                                        |
+| `docker compose down`                                        | Stop Compose stack                                    |
+| `docker build -f api/Dockerfile -t aqi-api:local .`          | Build API image                                       |
+| `docker build -f app/Dockerfile -t aqi-app:local .`          | Build dashboard image                                 |
+| `docker run --rm --env-file .env -p 8501:8501 aqi-app:local` | Run dashboard image                                   |
+| `docker run --rm --env-file .env -p 8000:8000 aqi-api:local` | Run API image                                         |
+| `pytest tests/`                                              | Run tests                                             |
 
 
 ---
@@ -849,31 +849,10 @@ There is no `SECURITY.md` in this repository.
 | ----------------- | -------------------------------------------------------------------------------------------------------------- |
 | Source repository | [https://github.com/hamzajawad123/aqi_predictor](https://github.com/hamzajawad123/aqi_predictor)               |
 | Issue tracker     | [https://github.com/hamzajawad123/aqi_predictor/issues](https://github.com/hamzajawad123/aqi_predictor/issues) |
-| Live app          | Same as [Live app](#live-app) (Streamlit Community Cloud URL after deploy)                                     |
+| Live app          | [https://lahore-aqi-predictor.streamlit.app](https://lahore-aqi-predictor.streamlit.app)                       |
 | OpenWeather API   | [https://openweathermap.org/api](https://openweathermap.org/api)                                               |
 | Hopsworks         | [https://www.hopsworks.ai/](https://www.hopsworks.ai/)                                                         |
 | Project report    | `[reports/final_report.docx](reports/final_report.docx)`                                                       |
 | Notebook notes    | `[notebooks/README.md](notebooks/README.md)`                                                                   |
 
 
----
-
-
-
-## Contributing
-
-This repository does not include a `CONTRIBUTING.md`. Suggested workflow (not project-specific policy):
-
-1. Create a branch.
-2. Make changes.
-3. Run `pytest tests/` when your change touches tested code.
-4. Commit (do not commit `.env` or keys).
-5. Push and open a pull request.
-
----
-
-
-
-## License
-
-No `LICENSE` file is present in this repository. Do not assume redistribution terms until the maintainers add one.

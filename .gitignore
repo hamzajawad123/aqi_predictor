@@ -36,6 +36,7 @@ data/*
 *.pth
 !reports/**/*.png
 !reports/**/*.csv
+reports/_report_figures/
 
 # ---- Hopsworks / MLOps local caches ----
 .hw_cache/
