@@ -8,7 +8,6 @@
   Ends with a **Findings for FE** section that must be reviewed before any
   feature-engineering changes.
 
-- `colab_training.ipynb` — optional Colab GPU training. Prefer calling
-  `from src.training_pipeline import train_and_evaluate` (or per-horizon
-  helpers) so Colab stays aligned with CI. Full training lives in
+- `02_training.ipynb` — Colab GPU training for the **0–500 regression** path
+  (aligned with `src/training_pipeline.py`). Full training also lives in
   `src/training_pipeline.py` via `python -m src.training_pipeline`.
