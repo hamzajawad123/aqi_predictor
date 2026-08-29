@@ -1,4 +1,4 @@
-"""Generate reports/final_report.docx. Run from repo root or this folder."""
+"""Build reports/final_report.docx."""
 from pathlib import Path
 
 from docx import Document
@@ -141,7 +141,7 @@ def build():
         run = fp.add_run("Pearls AQI Predictor  ·  10Pearls Data Science Internship  ·  Confidential student report")
         set_run(run, size=8, color=MUTED, italic=True)
 
-    # ----- Cover -----
+    # Cover
     for _ in range(3):
         doc.add_paragraph()
     t = para(doc, "10PEARLS  ·  DATA SCIENCE INTERNSHIP", size=12, bold=True, color=ACCENT, align="center", first_line=False, space_after=6)
@@ -315,11 +315,10 @@ def build():
     )
     body(
         doc,
-        "Local Docker Compose runs the API and dashboard as two services on an internal network, "
-        "with Streamlit calling http://api:8000. The same API_BASE_URL pattern is used for a "
-        "future hosted deployment (Streamlit Community Cloud or equivalent for the UI; FastAPI "
-        "Cloud or a container host for the API). Hopsworks remains the feature store and registry "
-        "in every environment."
+        "Local Docker Compose runs the API and dashboard from one image (ports 8000 and 8501). "
+        "Streamlit reads Hopsworks directly; FastAPI is an optional HTTP wrapper around the same "
+        "serving code. The public dashboard is on Streamlit Community Cloud. Hopsworks remains "
+        "the feature store and registry in every environment."
     )
 
     heading(doc, "4. Data sources and API selection", 1)
@@ -985,6 +984,7 @@ def build():
             "src/utils/evaluation.py — metrics, shrinkage, persistence gate",
             "api/main.py — FastAPI /predict",
             "app/ — Streamlit",
+            "Dockerfile — dashboard and API in one image",
             "notebooks/01_eda.ipynb — EDA on raw parquet",
             "notebooks/02_training.ipynb — Colab regression (Approach 2 run currently saved in outputs)",
             ".github/workflows/ — hourly features, daily training",

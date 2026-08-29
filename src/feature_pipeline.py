@@ -1,24 +1,8 @@
-"""
-Feature Pipeline
-================
-Runs HOURLY via .github/workflows/feature_pipeline.yml
+"""Hourly feature pipeline. Fetch, merge, validate, write features to Hopsworks.
 
-1. Fetch raw pollutant data (OpenWeather) + weather data (Open-Meteo).
-2. Merge them on their shared UTC timestamp and validate.
-3. Persist the raw merged snapshot to disk (for EDA / reproducibility).
-4. Compute features (time-based, lags, rolling stats, AQI change rate, season flag).
-5. Write the resulting row(s) to the Hopsworks Feature Store.
-
-Also usable directly for:
-  - BACKFILL:   python -m src.feature_pipeline backfill [YYYY-MM-DD]
-  - RAW ONLY:   python -m src.feature_pipeline raw-snapshot [YYYY-MM-DD]
-                (fetch + validate + save parquet; no FE, no Hopsworks)
-
-IMPORTANT: pollution always comes from OpenWeather and weather always comes
-from Open-Meteo, in BOTH this hourly path and the backfill path. Using
-different sources for the same variable between backfill and live collection
-is exactly the train/serving skew a feature store exists to prevent — so
-don't swap either source in just one of the two functions below.
+  python -m src.feature_pipeline
+  python -m src.feature_pipeline backfill
+  python -m src.feature_pipeline raw-snapshot
 """
 from __future__ import annotations
 
@@ -38,14 +22,9 @@ from src.utils.hopsworks_utils import get_feature_store, get_or_create_feature_g
 from src.utils.data_validation import validate_raw_data
 from src.utils.raw_io import save_raw_snapshot, upsert_raw_snapshot
 
-# A row needs max(AQI_LAGS) hours BEHIND it for its lags and max(TARGET_HORIZONS)
-# hours AHEAD of it for its targets, so a window has to span both before it can
-# yield a single row that has each. At the previous 200h it could not: rows old
-# enough for aqi_lag_168h were newer than 72h, so build_feature_set returned
-# zero rows and every hourly run inserted nothing (verified: 200 rows in, 0 out).
-# The margin on top absorbs late/missed upstream hours.
+# Need 168h behind and 72h ahead, plus a little extra.
 _MIN_LOOKBACK_HOURS = max(AQI_LAGS) + max(config.TARGET_HORIZONS) + 1
-LOOKBACK_HOURS = _MIN_LOOKBACK_HOURS + 95  # 336h = 14 days
+LOOKBACK_HOURS = _MIN_LOOKBACK_HOURS + 95  # 14 days
 
 _INT64_COLS = (
     "hour",
@@ -58,7 +37,7 @@ _INT64_COLS = (
 
 
 def _cast_for_hopsworks(features_df: pd.DataFrame) -> pd.DataFrame:
-    """Cast integer-like columns to int64 so Hopsworks bigint schema matches."""
+    """Make integer columns int64 for Hopsworks."""
     df = features_df.copy()
     for col in _INT64_COLS:
         if col in df.columns:
@@ -67,12 +46,7 @@ def _cast_for_hopsworks(features_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _unix_utc(ts: pd.Timestamp) -> int:
-    """
-    UNIX seconds for OpenWeather. `.timestamp()` on a naive Timestamp is
-    treated as *local* time, which shifts the requested window by the host
-    UTC offset. Naive values here are UTC wall-clock hours, so localize
-    them before converting.
-    """
+    """Unix seconds in UTC. Naive timestamps here are UTC, not local time."""
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     else:
@@ -81,25 +55,12 @@ def _unix_utc(ts: pd.Timestamp) -> int:
 
 
 def _as_utc(series: pd.Series) -> pd.Series:
-    """
-    Normalize timestamps to UTC-aware so string/tz format cannot make two
-    equal hours look different. Hopsworks may return
-    '2026-08-18 05:00:00+00:00'; local frames are naive UTC. Comparing either
-    as str would treat those as distinct and re-insert every stored hour.
-    """
+    """Timestamps as UTC so two equal hours are not treated as different."""
     return pd.to_datetime(series, utc=True)
 
 
 def fetch_merged_lookback(lookback_hours: int = LOOKBACK_HOURS) -> pd.DataFrame:
-    """
-    Fetch a rolling lookback window from both APIs, merge on timestamp,
-    clip to <= now, and validate. Returns an empty DataFrame on soft failure.
-    """
-    # Both forms are needed. .timestamp() on a tz-NAIVE Timestamp reads it as
-    # local time, which would shift the requested window by the machine's UTC
-    # offset, so the API bounds come from the tz-aware value. The fetchers
-    # return tz-naive UTC though, so the frame has to be compared against the
-    # naive one (mixing them raises "Cannot compare tz-naive and tz-aware").
+    """Recent hours from both APIs, merged and checked."""
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
     now = now_utc.tz_localize(None)
     lookback_start = now_utc - pd.Timedelta(hours=lookback_hours)
@@ -124,8 +85,7 @@ def fetch_merged_lookback(lookback_hours: int = LOOKBACK_HOURS) -> pd.DataFrame:
         return pd.DataFrame()
 
     merged_df = merge_pollution_and_weather(pollution_df, weather_df)
-    # Keep only the lookback window -- Open-Meteo's forecast_days=1 can hand
-    # back a couple of hours past `now`; those aren't real observations yet.
+    # Drop future hours from Open-Meteo.
     merged_df = merged_df[merged_df["timestamp"] <= now]
 
     if merged_df.empty:
@@ -149,13 +109,8 @@ def fetch_merged_lookback(lookback_hours: int = LOOKBACK_HOURS) -> pd.DataFrame:
 def fetch_merged_historical(
     start_date: str | None = None, chunk_days: int = 30
 ) -> pd.DataFrame:
-    """
-    Fetch full historical pollution (chunked) + weather, merge, and validate.
-    Stops before feature engineering — callers decide whether to save raw,
-    engineer features, and/or push to Hopsworks.
-    """
+    """Full history from both APIs, merged and checked."""
     start_date = start_date or config.DATA_START_DATE
-    # Same UTC rule as fetch_merged_lookback: naive .timestamp() is local time.
     start_utc = pd.Timestamp(start_date, tz="UTC")
     end_utc = pd.Timestamp.now(tz="UTC").floor("h")
     start_ts = start_utc.tz_localize(None)
@@ -209,11 +164,7 @@ def fetch_merged_historical(
 
 
 def run_raw_snapshot(start_date: str | None = None, chunk_days: int = 30) -> None:
-    """
-    Step 1 entrypoint: fetch + validate historical merge, save to
-    config.RAW_DATA_PATH, and exit. No feature engineering, no Hopsworks.
-    """
-    # Only OpenWeather is required for a raw fetch; Hopsworks keys are not.
+    """Save the raw merge to disk. No features, no Hopsworks."""
     if not config.OPENWEATHER_API_KEY:
         raise EnvironmentError(
             "Missing OPENWEATHER_API_KEY. Copy .env.example to .env and fill in."
@@ -240,27 +191,7 @@ def run_raw_snapshot(start_date: str | None = None, chunk_days: int = 30) -> Non
 
 
 def run_hourly_feature_pipeline():
-    """
-    IMPORTANT FIX: this used to fetch only the CURRENT hour (1 row) from each
-    source, then call build_feature_set() on that single row. Lag/rolling
-    features need real history to compute, so on a 1-row input they were all
-    NaN -- and build_feature_set()'s trailing dropna() then dropped that one
-    row entirely. Net effect: fg.insert() ran on an EMPTY dataframe every
-    single hour, silently inserting 0 rows every run since automation started.
-    This is why the feature store has 407 gaps / 3,617 missing hours -- the
-    only rows that ever made it in came from manual backfill_historical() runs.
-
-    Fix: fetch a LOOKBACK_HOURS window (enough for aqi_lag_168h to have real
-    data), run build_feature_set on the whole window so lags/rolling are
-    correctly computed, then insert only the rows for hours not already in
-    the feature store (skip-if-exists, so this can also self-heal small gaps
-    from a missed run without duplicating what's already there).
-
-    The window is built with is_training=False, so the newest hours are kept
-    even though their targets are still in the future — those are the rows the
-    forecast is made from. Their targets land as NULL and are filled in by a
-    later run, once the hours they refer to have actually happened.
-    """
+    """Hourly run: look back enough hours, then insert new rows."""
     config.validate_config()
 
     merged_df = fetch_merged_lookback(LOOKBACK_HOURS)
@@ -282,15 +213,7 @@ def run_hourly_feature_pipeline():
     fs = get_feature_store()
     fg = get_or_create_feature_group(fs, df_for_schema=features_df)
 
-    # Skip timestamps already stored, so a normal run only inserts the newest
-    # hour(s) -- but a run after a missed hour or an outage naturally
-    # backfills whatever's missing too, instead of just the latest point.
-    #
-    # EXCEPT rows whose targets are now known. Every row is first written while
-    # its future hasn't happened, so it lands with NULL targets; skipping it
-    # forever after would leave it permanently untrainable and quietly stop the
-    # training set from growing. Re-inserting it upserts on the timestamp
-    # primary key, replacing the NULLs with the real future.
+    # Insert new hours, and re-insert rows whose future AQI is now known.
     target_cols = [f"aqi_target_{h}h" for h in config.TARGET_HORIZONS]
     has_targets = features_df[target_cols].notna().all(axis=1)
     try:
@@ -319,10 +242,7 @@ def run_hourly_feature_pipeline():
 
 
 def backfill_historical(start_date: str | None = None, chunk_days: int = 30):
-    """
-    Run ONCE, manually, before automation starts. Populates the feature store
-    with historical data to train on. Also upserts the local raw snapshot.
-    """
+    """One-time fill of history into Hopsworks."""
     config.validate_config()
 
     start_date = start_date or config.DATA_START_DATE
@@ -349,16 +269,10 @@ def backfill_historical(start_date: str | None = None, chunk_days: int = 30):
 
 
 def push_features_from_raw():
-    """
-    Build the post-EDA feature set from the local raw snapshot and insert into
-    Hopsworks (FEATURE_GROUP_VERSION, default v4). Skips re-fetching APIs.
-    """
+    """Build features from the local parquet and upload."""
     from src.utils.raw_io import load_raw_snapshot
 
     config.validate_config()
-    # Announced before the upload, not after: an unsaved .env edit once sent a
-    # full rebuild into the previous feature group version, and the only
-    # mention of the target came in the closing line.
     print(
         f"[push-features] Target: {config.FEATURE_GROUP_NAME} "
         f"v{config.FEATURE_GROUP_VERSION} (from FEATURE_GROUP_VERSION)"

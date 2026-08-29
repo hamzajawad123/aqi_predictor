@@ -1,22 +1,4 @@
-"""
-Training Pipeline
-==================
-Runs DAILY via .github/workflows/training_pipeline.yml
-
-For each horizon in config.TARGET_HORIZONS (24h / 48h / 72h = day 1 / 2 / 3):
-1. Train + Optuna-tune tabular models on aqi_delta_{h}h
-2. Train Prophet on absolute aqi (level series), fitted through end of val
-3. Train LSTM/GRU on delta; reconstruct absolute for metrics
-4. Add a shrunk variant of every delta model, with the shrinkage factor fitted
-   on VALIDATION (0 = persistence, 1 = raw model)
-5. Build simple mean ensembles on reconstructed absolute predictions
-6. Compare everyone to that horizon's persistence baseline (RMSE+MAE+R2)
-7. Register ONLY the single best model that beats persistence on all 3
-   metrics, as aqi_forecaster_{h}h
-
-Set config.TRAIN_START_DATE to train on the recent regime only.
-SHAP runs on the winning tree model per horizon when applicable.
-"""
+"""Daily training. Tune models, score vs persistence, register a winner per horizon."""
 from __future__ import annotations
 
 import os
@@ -43,21 +25,12 @@ from src.train_gru import train_gru_model
 
 TABULAR_MODEL_NAMES = {"Ridge", "RandomForest", "XGBoost", "LightGBM"}
 TREE_MODEL_NAMES = {"RandomForest", "XGBoost", "LightGBM"}
-# /predict feeds one flat feature row: Prophet needs a `ds` series and the
-# recurrent nets need a 24-hour window, so neither can be served through it.
+# /predict gets one row. Prophet and LSTM/GRU need more, so they are not served.
 SERVEABLE_KINDS = {"tabular", "ensemble"}
 
 
 def load_training_data() -> pd.DataFrame:
-    """
-    Read the feature group, minus rows whose targets aren't known yet.
-
-    The hourly pipeline writes each hour as soon as its features are complete,
-    which is ~72h before its targets can exist, so the newest rows in the store
-    legitimately carry NULL targets. They're the rows inference reads; for
-    training they'd be NaN labels, so drop them here at the boundary rather
-    than letting each model discover them differently.
-    """
+    """Read features. Drop rows whose future AQI is still unknown."""
     fs = get_feature_store()
     fg = fs.get_feature_group(
         name=config.FEATURE_GROUP_NAME,
@@ -81,12 +54,11 @@ def load_training_data() -> pd.DataFrame:
 
 
 def feature_columns(df: pd.DataFrame) -> list[str]:
-    """Drop timestamp + all absolute/delta target columns from model inputs."""
+    """Columns the model may use."""
     drop = {"timestamp"}
     for h in config.TARGET_HORIZONS:
         drop.add(f"aqi_target_{h}h")
         drop.add(f"aqi_delta_{h}h")
-    # Raw hour/month are redundant with cyclical encodings (kept historically)
     drop.update({"hour", "month", "openweather_aqi_category"})
     return [c for c in df.columns if c not in drop]
 
@@ -105,7 +77,7 @@ def chronological_split_by_fraction(df: pd.DataFrame, train_frac=0.7, val_frac=0
 
 
 def chronological_split(df: pd.DataFrame):
-    """Season-aligned June→June chronological split (smog season stays intact)."""
+    """Train / val / test split that keeps smog season together."""
     df = df.sort_values("timestamp").reset_index(drop=True)
     max_date = df["timestamp"].max()
 
@@ -158,13 +130,7 @@ def _add_delta_candidate(
     test_anchor,
     test_absolute_true,
 ) -> None:
-    """
-    Score one delta model on reconstructed absolute AQI and, when enabled, add
-    a second candidate whose delta is shrunk by a factor fitted on validation.
-
-    Both variants share the same fitted model — only the multiplier applied to
-    its predicted delta differs, so the shrunk variant costs no extra training.
-    """
+    """Score the model, then maybe add a shrunk copy fitted on validation."""
     raw_pred = reconstruct_absolute(test_anchor, test_delta_pred)
     metrics = evaluate(test_absolute_true, raw_pred, name)
     metrics["horizon_hours"] = horizon
@@ -187,8 +153,7 @@ def _add_delta_candidate(
         f"lambda={lam:.2f} (val RMSE {diag['val_rmse']:.2f} vs persistence "
         f"{diag['val_persistence_rmse']:.2f})"
     )
-    # lambda == 1 duplicates the raw row; lambda == 0 is exactly persistence,
-    # which can never pass a strictly-better gate.
+    # 1 = raw model, 0 = persistence. Skip those two.
     if lam <= 0.0 or lam >= 1.0:
         return
 
@@ -209,13 +174,7 @@ def _add_delta_candidate(
 
 def _build_artifact(winner: dict, candidates: dict, results: list[dict],
                     baseline: dict, feature_cols: list[str], horizon: int) -> dict | None:
-    """
-    Turn the winning comparison row into a registry artifact.
-
-    If the overall winner can't be served through /predict (Prophet, LSTM, GRU)
-    we fall back to the best serveable candidate that still beats persistence
-    on all three metrics, and log the substitution.
-    """
+    """Build the object we save. If the winner cannot be served, pick the next one."""
     name = winner["model"]
     cand = candidates.get(name)
 
@@ -256,13 +215,13 @@ def train_one_horizon(
     test_df: pd.DataFrame,
     feature_cols: list[str],
 ) -> dict:
-    """Train all models for one horizon; return comparison + optional winner artifact."""
+    """Train every model for one horizon."""
     delta_col = f"aqi_delta_{horizon}h"
     abs_col = f"aqi_target_{horizon}h"
 
     baseline = persistence_baseline(test_df, abs_col)
     baseline["horizon_hours"] = horizon
-    baseline["shrinkage"] = 0.0  # persistence IS the delta=0 prediction
+    baseline["shrinkage"] = 0.0
     results = [baseline]
     candidates: dict[str, dict] = {}
 
@@ -276,8 +235,7 @@ def train_one_horizon(
 
     tscv = TimeSeriesSplit(n_splits=5)
 
-    # --- Prophet (absolute levels, fitted through end of val so it only ever
-    # forecasts `horizon` hours past its own data) ---
+    # Prophet on AQI level
     prophet_fit_df = pd.concat([train_df, val_df], ignore_index=True)
     _, prophet_result = train_prophet_model(
         prophet_fit_df, test_df, target_col=abs_col, horizon_hours=horizon
@@ -285,7 +243,7 @@ def train_one_horizon(
     prophet_result["horizon_hours"] = horizon
     results.append(prophet_result)
 
-    # --- Tabular on deltas ---
+    # Tables on AQI change
     for name, tuner in [
         ("Ridge", tune_ridge),
         ("RandomForest", tune_random_forest),
@@ -304,8 +262,7 @@ def train_one_horizon(
             test_absolute_true=y_test_abs,
         )
 
-    # --- LSTM / GRU on deltas (windowed, so their preds are seq_len-1 rows
-    # shorter than the tabular ones and stay out of the ensembles) ---
+    # LSTM / GRU
     for name, trainer in [("LSTM", train_lstm_model), ("GRU", train_gru_model)]:
         model, _, meta = trainer(
             train_df, val_df, test_df, feature_cols, delta_col,
@@ -322,14 +279,14 @@ def train_one_horizon(
             test_absolute_true=meta["test_absolute_true"],
         )
 
-    # --- Ensembles over the tabular candidates (raw and shrunk both eligible) ---
+    # Average of the best tabular models
     tabular_ranked = [
         name for name, c in sorted(
             candidates.items(), key=lambda kv: kv[1]["metrics"]["RMSE"]
         )
         if c["kind"] == "tabular"
     ]
-    # One variant per base model, so an ensemble can't be three copies of XGBoost
+    # At most one copy of each base model
     seen_bases, members_top = set(), []
     for name in tabular_ranked:
         base = name.removesuffix(SHRUNK_SUFFIX)
@@ -365,7 +322,7 @@ def train_one_horizon(
                 },
             },
             "kind": "ensemble",
-            "shrinkage": 1.0,  # each member already carries its own factor
+            "shrinkage": 1.0,
             "abs_pred": ens_pred,
             "metrics": ens_metrics,
         }
@@ -436,8 +393,7 @@ def register_model(artifact: dict):
         "horizon_hours": horizon,
         "target_type": artifact.get("target_type", "delta"),
         "model_name": name,
-        # Serving must apply the same factor training scored with, or the
-        # served prediction won't match the registered metrics.
+        # Same shrink factor as in training.
         "shrinkage": shrinkage,
     }
     model_path = f"model_artifact/{model_registry_name}.joblib"

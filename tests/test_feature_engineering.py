@@ -1,8 +1,4 @@
-"""
-Basic unit tests for feature engineering — run with: pytest tests/
-Keeps the pipeline honest: if you change feature logic, these catch
-accidental breakage before it reaches the feature store.
-"""
+"""Feature engineering tests."""
 import pandas as pd
 import numpy as np
 from src.utils.feature_engineering import (
@@ -52,13 +48,13 @@ def test_build_feature_set_drops_na_rows():
 
 
 def test_serving_mode_keeps_rows_whose_targets_are_unknown():
-    """The current hour has no 72h future yet, and it's the row we predict from."""
+    """Latest hour stays, even without a 72h future."""
     raw = _sample_df()
     serving = build_feature_set(raw, is_training=False)
     training = build_feature_set(raw, is_training=True)
 
     assert len(serving) > len(training)
-    # the most recent usable hour survives, with real lags but no target
+    # Latest hour has lags, but not a 72h target.
     latest = serving.iloc[-1]
     assert latest["timestamp"] == raw["timestamp"].iloc[-1]
     assert pd.notna(latest["aqi_lag_168h"])
@@ -66,7 +62,7 @@ def test_serving_mode_keeps_rows_whose_targets_are_unknown():
 
 
 def test_serving_mode_returns_same_columns_as_training():
-    """The feature group schema is built from this frame, so it must not vary."""
+    """Training and serving must use the same columns."""
     raw = _sample_df()
     assert list(build_feature_set(raw, is_training=False).columns) == \
         list(build_feature_set(raw, is_training=True).columns)
@@ -81,11 +77,7 @@ def test_serving_mode_requires_complete_features():
 
 
 def test_hourly_lookback_window_can_yield_trainable_rows():
-    """
-    Regression: at LOOKBACK_HOURS=200 a row could not have both aqi_lag_168h
-    (needs 168h behind) and aqi_target_72h (needs 72h ahead), so the hourly
-    pipeline built an empty frame and inserted nothing, every run.
-    """
+    """A 14-day window must produce at least one training row."""
     from src.feature_pipeline import LOOKBACK_HOURS
 
     window = _sample_df(n=LOOKBACK_HOURS)
@@ -100,7 +92,7 @@ def test_to_hourly_grid_fills_missing_hours():
     steps = grid["timestamp"].diff().dt.total_seconds().div(3600).dropna()
     assert (steps == 1).all()
     assert len(grid) == 50
-    # a short outage gets interpolated rather than dropped
+    # Short gap is filled.
     assert grid["aqi"].notna().all()
 
 
@@ -109,11 +101,11 @@ def test_to_hourly_grid_leaves_long_outages_missing():
     gappy = df.drop(index=range(10, 30)).reset_index(drop=True)  # 20-hour outage
 
     grid = to_hourly_grid(gappy, interpolate_limit=6)
-    assert grid["aqi"].isna().sum() == 20  # not invented
+    assert grid["aqi"].isna().sum() == 20
 
 
 def test_targets_span_real_hours_after_gaps():
-    """A row-position shift on a gappy frame silently spans the wrong horizon."""
+    """After a gap, 24h later still means 24 hours, not 24 rows."""
     df = _sample_df(n=200)
     gappy = df.drop(index=range(50, 60)).reset_index(drop=True)  # 10-hour outage
 
@@ -130,5 +122,5 @@ def test_log_pollutants_applied():
     from src.utils.feature_engineering import add_log_pollutants
     raw = _sample_df()
     logged = add_log_pollutants(raw)
-    # pm2_5=20 -> log1p(20)
+    # log1p(20)
     assert abs(logged["pm2_5"].iloc[0] - np.log1p(20.0)) < 1e-9

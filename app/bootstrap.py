@@ -1,4 +1,4 @@
-"""Make `src` importable. Load secrets without touching st.secrets locally."""
+"""Add src to the path. Load secrets on Streamlit Cloud only."""
 from __future__ import annotations
 
 import os
@@ -39,8 +39,7 @@ def setup() -> None:
             _apply_mapping(tomllib.loads(path.read_text(encoding="utf-8")))
             return
 
-    # Streamlit Cloud injects secrets into st.secrets (no local toml).
-    # Never access st.secrets on a local machine — that prints "No secrets found".
+    # On Streamlit Cloud, secrets live in st.secrets.
     if not _likely_streamlit_cloud():
         return
     try:

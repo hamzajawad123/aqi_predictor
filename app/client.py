@@ -1,4 +1,4 @@
-"""Dashboard data. Streamlit Cloud talks to Hopsworks via src.utils.serving."""
+"""Load dashboard data from Hopsworks."""
 from __future__ import annotations
 
 import streamlit as st

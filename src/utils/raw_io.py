@@ -1,10 +1,4 @@
-"""
-Local persistence for raw (pre-feature-engineering) pollution+weather data.
-
-The hourly/backfill pipelines fetch and validate a merged frame, then call
-these helpers so EDA and later FE always have a reproducible raw snapshot on
-disk — not only the engineered Hopsworks table.
-"""
+"""Save and load the raw pollution + weather parquet."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,8 +7,7 @@ import pandas as pd
 
 from src import config
 
-# Project root (…/aqi-predictor), not the caller's CWD. Notebooks run from
-# notebooks/ so a relative "data/raw/…" path would otherwise miss the file.
+# Always the project root, even if you run from notebooks/.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -26,7 +19,7 @@ def _resolve_path(path: str | Path | None = None) -> Path:
 
 
 def save_raw_snapshot(df: pd.DataFrame, path: str | Path | None = None) -> Path:
-    """Overwrite the raw parquet snapshot. Returns the path written."""
+    """Write the raw parquet. Returns the path."""
     out = _resolve_path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     to_write = df.sort_values("timestamp").reset_index(drop=True)
@@ -39,7 +32,7 @@ def save_raw_snapshot(df: pd.DataFrame, path: str | Path | None = None) -> Path:
 
 
 def load_raw_snapshot(path: str | Path | None = None) -> pd.DataFrame:
-    """Load the raw parquet snapshot. Raises FileNotFoundError if missing."""
+    """Read the raw parquet."""
     out = _resolve_path(path)
     if not out.exists():
         raise FileNotFoundError(
@@ -52,10 +45,7 @@ def load_raw_snapshot(path: str | Path | None = None) -> pd.DataFrame:
 
 
 def upsert_raw_snapshot(df: pd.DataFrame, path: str | Path | None = None) -> Path:
-    """
-    Merge `df` into the existing raw snapshot on `timestamp` (keep last),
-    then rewrite. Creates the file if it does not exist yet.
-    """
+    """Add new hours into the existing parquet (keep last if duplicate)."""
     out = _resolve_path(path)
     incoming = df.copy()
     incoming["timestamp"] = pd.to_datetime(incoming["timestamp"]).dt.tz_localize(None)

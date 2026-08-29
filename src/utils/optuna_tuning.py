@@ -1,17 +1,4 @@
-"""
-Hyperparameter tuning via Optuna, using TimeSeriesSplit for cross-validation
-(never shuffled — shuffling time-series data leaks future rows into training).
-
-Each `tune_*` function runs an Optuna study whose objective is the average
-RMSE across the TimeSeriesSplit folds, then refits the winning
-hyperparameters on the FULL training set and returns that fitted model —
-matching the same pattern `RandomizedSearchCV(...).best_estimator_` used
-previously, just with Optuna driving the search instead of random sampling.
-
-N_TRIALS is deliberately modest (20) — each trial re-fits the model across
-every CV fold, so trials × folds = total fits. Lower this if a run feels too
-slow on your machine; raise it if you have time and want a more thorough search.
-"""
+"""Optuna search with time-series CV. No shuffle — that would leak the future."""
 import numpy as np
 import optuna
 from sklearn.linear_model import Ridge
@@ -22,13 +9,13 @@ from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
 
-optuna.logging.set_verbosity(optuna.logging.WARNING)  # keep console output readable
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 N_TRIALS = 20
 
 
 def _cv_rmse(model, X, y, tscv) -> float:
-    """Average RMSE across TimeSeriesSplit folds — the value Optuna minimizes."""
+    """Mean RMSE on the time-series folds."""
     scores = []
     for train_idx, val_idx in tscv.split(X):
         model.fit(X.iloc[train_idx], y.iloc[train_idx])
@@ -38,15 +25,7 @@ def _cv_rmse(model, X, y, tscv) -> float:
 
 
 def tune_ridge(X_train, y_train, tscv, n_trials: int = N_TRIALS):
-    """
-    Ridge's L2 penalty is scale-sensitive -- without scaling, large-magnitude
-    features (co, pressure) dominate small-magnitude ones (hour_sin, is_weekend)
-    regardless of actual predictive value. Wrapped in a Pipeline (not a
-    separately-returned scaler) so the fitted object stays a plain
-    fit/predict-compatible estimator -- stratified_evaluation(), register_model(),
-    and api/main.py's /predict endpoint all call .predict(raw_features) on
-    whatever model wins, with no special-casing for Ridge required.
-    """
+    """Ridge with scaling, so big and small features are treated fairly."""
     def objective(trial):
         alpha = trial.suggest_float("alpha", 0.01, 100.0, log=True)
         pipeline = make_pipeline(StandardScaler(), Ridge(alpha=alpha))

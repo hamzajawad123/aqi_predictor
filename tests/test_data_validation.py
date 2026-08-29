@@ -1,4 +1,4 @@
-"""Tests for src/utils/data_validation.py."""
+"""Data validation tests."""
 import pandas as pd
 import numpy as np
 from src.utils.data_validation import validate_raw_data, DataValidationError

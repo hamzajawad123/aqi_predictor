@@ -1,13 +1,7 @@
-"""
-GRU model for AQI forecasting (TensorFlow/Keras).
-
-Lighter-weight recurrent alternative to the LSTM. Both share one
-implementation in train_lstm.train_recurrent_model so the delta-reconstruction
-and scaling logic can't drift apart between the two.
-"""
+"""GRU wrapper. Same trainer as LSTM."""
 from __future__ import annotations
 
-from src.train_lstm import (  # re-exported for callers that import from here
+from src.train_lstm import (
     SEQUENCE_LENGTH,
     build_recurrent,
     make_sequences,

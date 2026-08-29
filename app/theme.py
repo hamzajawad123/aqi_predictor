@@ -1,4 +1,4 @@
-"""US EPA AQI bands and colors — no Streamlit imports."""
+"""EPA AQI bands and colors."""
 from __future__ import annotations
 
 EPA_BANDS = (

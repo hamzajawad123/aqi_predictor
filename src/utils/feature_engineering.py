@@ -1,43 +1,19 @@
-"""
-Feature engineering for AQI forecasting.
-Turns raw (timestamp, pollutants, weather) rows into the model-ready feature set.
-
-IMPORTANT: this same function must be used by BOTH the feature pipeline (writing to
-the feature store) and, conceptually, understood by the training pipeline (reading
-from it) — so feature definitions never drift between training and serving.
-
-EDA-justified choices (see notebooks/01_eda.ipynb Findings for FE):
-- log1p on right-skewed pollutants
-- lags {1,3,6,24,168} and rolling {3,6,24} from ACF/PACF
-- delta targets to address multi-year downward AQI trend
-"""
+"""Build model features from raw pollution + weather rows."""
 import numpy as np
 import pandas as pd
 
 from src import config
 
-# Right-skewed pollutants from raw EDA (skew > 1 for all of these)
 LOG_POLLUTANT_COLS = ("co", "no", "no2", "o3", "so2", "pm2_5", "pm10", "nh3")
 AQI_LAGS = (1, 3, 6, 24, 168)
 AQI_ROLL_WINDOWS = (3, 6, 24)
-# Short outages get interpolated; anything longer stays NaN and those rows are
-# dropped rather than invented. 6h is well under the shortest lag/target span.
+# Fill gaps of 6 hours or less. Longer gaps stay empty and get dropped.
 MAX_INTERPOLATE_HOURS = 6
 
 
 def to_hourly_grid(df: pd.DataFrame, ts_col: str = "timestamp",
                    interpolate_limit: int = MAX_INTERPOLATE_HOURS) -> pd.DataFrame:
-    """
-    Reindex onto a strict hourly grid before any shifting happens.
-
-    Every lag, rolling window, change rate and target below shifts by ROW
-    POSITION, which only equals hours when no hour is missing. The raw history
-    has ~3,700 missing hours in 415 outages, so on the gappy frame shift(-24)
-    actually spanned 24h for only 87% of rows and up to 264h for the rest —
-    i.e. those rows were trained against the wrong future. Reindexing first
-    makes position and time mean the same thing again; gaps longer than
-    interpolate_limit stay NaN and get dropped by build_feature_set.
-    """
+    """Make one row per hour so lags mean real hours, not just row counts."""
     df = df.sort_values(ts_col).drop_duplicates(subset=ts_col)
     grid = pd.date_range(df[ts_col].min(), df[ts_col].max(), freq="h")
     out = df.set_index(ts_col).reindex(grid).rename_axis(ts_col).reset_index()
@@ -45,10 +21,7 @@ def to_hourly_grid(df: pd.DataFrame, ts_col: str = "timestamp",
     if not interpolate_limit:
         return out
 
-    # Fill only outages that are short END TO END. Pandas' own `limit` caps
-    # consecutive fills instead, which would patch the first 6 hours of a
-    # 20-hour outage by interpolating toward a reading 20 hours away — that
-    # invents a trajectory rather than bridging a blip.
+    # Only fill short gaps. Do not fill the start of a long outage.
     inserted = ~out[ts_col].isin(set(df[ts_col]))
     run_id = (inserted != inserted.shift()).cumsum()
     run_length = out.groupby(run_id)[ts_col].transform("size")
@@ -61,7 +34,7 @@ def to_hourly_grid(df: pd.DataFrame, ts_col: str = "timestamp",
 
 
 def add_time_features(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFrame:
-    """Cyclical hour/day/month encodings, so e.g. hour=23 and hour=0 are 'close'."""
+    """Hour and month as sin/cos so 23 and 0 sit next to each other."""
     df = df.copy()
     df["hour"] = df[ts_col].dt.hour
     df["day_of_week"] = df[ts_col].dt.dayofweek
@@ -76,12 +49,7 @@ def add_time_features(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFra
 
 
 def add_season_flag(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Lahore smog-season flag (Oct-Jan). Used both as a model feature and,
-    unchanged, as the stratification key for smog-vs-normal evaluation in
-    training_pipeline.py — keeping one definition avoids the two ever
-    silently drifting apart.
-    """
+    """1 in Oct–Jan, else 0."""
     df = df.copy()
     df["is_smog_season"] = df["month"].isin(config.SMOG_SEASON_MONTHS).astype(int)
     return df
@@ -89,10 +57,7 @@ def add_season_flag(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_log_pollutants(df: pd.DataFrame,
                        cols: tuple[str, ...] = LOG_POLLUTANT_COLS) -> pd.DataFrame:
-    """
-    log1p transform for right-skewed pollutant concentrations (EDA skew >> 1).
-    Replaces the raw column in-place so downstream interactions/lags stay simple.
-    """
+    """log1p on skewed pollutants. Replaces the raw column."""
     df = df.copy()
     for col in cols:
         if col in df.columns:
@@ -102,7 +67,7 @@ def add_log_pollutants(df: pd.DataFrame,
 
 def add_lag_features(df: pd.DataFrame, col: str = "aqi",
                       lags: tuple[int, ...] = AQI_LAGS) -> pd.DataFrame:
-    """Lag features justified by ACF/PACF on raw AQI (1h, 3h, 6h, 24h, 168h)."""
+    """Past AQI at 1, 3, 6, 24 and 168 hours."""
     df = df.copy()
     for lag in lags:
         df[f"{col}_lag_{lag}h"] = df[col].shift(lag)
@@ -111,7 +76,7 @@ def add_lag_features(df: pd.DataFrame, col: str = "aqi",
 
 def add_rolling_features(df: pd.DataFrame, col: str = "aqi",
                           windows: tuple[int, ...] = AQI_ROLL_WINDOWS) -> pd.DataFrame:
-    """Rolling mean/std/min/max — captures short-term trend and volatility."""
+    """Rolling mean / std / min / max of AQI."""
     df = df.copy()
     for w in windows:
         df[f"{col}_roll_mean_{w}h"] = df[col].rolling(w).mean()
@@ -122,7 +87,7 @@ def add_rolling_features(df: pd.DataFrame, col: str = "aqi",
 
 
 def add_change_rate(df: pd.DataFrame, col: str = "aqi") -> pd.DataFrame:
-    """AQI change rate (explicitly required by the project brief)."""
+    """How much AQI moved in the last 1h and 24h."""
     df = df.copy()
     df[f"{col}_change_rate_1h"] = df[col].diff(1)
     df[f"{col}_change_rate_24h"] = df[col].diff(24)
@@ -130,10 +95,7 @@ def add_change_rate(df: pd.DataFrame, col: str = "aqi") -> pd.DataFrame:
 
 
 def add_weather_interactions(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Lahore-specific interactions: wind disperses pollution, humidity affects
-    secondary particle formation. Requires wind_speed/humidity/pm2_5 columns.
-    """
+    """Wind × PM2.5 and humidity × PM2.5."""
     df = df.copy()
     if {"wind_speed", "pm2_5"}.issubset(df.columns):
         df["wind_pollutant_interaction"] = df["wind_speed"] * df["pm2_5"]
@@ -144,10 +106,7 @@ def add_weather_interactions(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_targets(df: pd.DataFrame, col: str = "aqi",
                  horizons: tuple[int, ...] = None) -> pd.DataFrame:
-    """
-    Absolute future AQI at t+h (for metrics / Prophet) plus delta targets
-    (aqi_target - aqi) used as the primary train target for tabular/RNN models.
-    """
+    """Future AQI and the change from now, for 24 / 48 / 72 hours."""
     horizons = horizons or config.TARGET_HORIZONS
     df = df.copy()
     for h in horizons:
@@ -158,25 +117,8 @@ def add_targets(df: pd.DataFrame, col: str = "aqi",
 
 
 def build_feature_set(raw_df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
-    """
-    Full pipeline: raw dataframe -> model-ready features + absolute/delta targets.
-
-    is_training=True drops any row with a NaN anywhere, so every row has both
-    complete lags and a known future. is_training=False keeps rows whose
-    targets aren't knowable yet, which is the only way the most recent hours
-    survive: aqi_target_72h needs 72 hours that haven't happened, so requiring
-    it discards exactly the rows inference needs.
-
-    Target columns are built in BOTH modes (as NaN when the future is unknown)
-    so the returned schema never depends on the caller — the feature group is
-    created from this frame, and a mode-dependent column set would either fail
-    schema validation or silently fork the stored table.
-    """
-    # aqi, humidity and wind_deg arrive as whole numbers, and the feature store
-    # schema types them as bigint. Interpolating across a gap makes them
-    # fractional, so round straight away (before lags/targets are derived from
-    # them, so every derived column agrees) and restore the dtype at the end,
-    # once the NaN rows an integer column can't hold are gone.
+    """Raw rows to features + targets. Training drops rows with missing future AQI."""
+    # Round whole-number cols so Hopsworks can store them as bigint.
     integer_cols = [c for c in raw_df.columns if pd.api.types.is_integer_dtype(raw_df[c])]
 
     df = to_hourly_grid(raw_df)
@@ -190,8 +132,7 @@ def build_feature_set(raw_df: pd.DataFrame, is_training: bool = True) -> pd.Data
     df = add_change_rate(df)
     df = add_weather_interactions(df)
     df = add_targets(df)
-    # Rows at the start (no lag history) and end (no future target) become NaN —
-    # drop them here rather than silently letting the model choke on them later.
+    # First and last rows lack lags or future AQI.
     if is_training:
         df = df.dropna().reset_index(drop=True)
     else:
@@ -200,8 +141,6 @@ def build_feature_set(raw_df: pd.DataFrame, is_training: bool = True) -> pd.Data
             if not c.startswith(("aqi_target_", "aqi_delta_"))
         ]
         df = df.dropna(subset=feature_cols).reset_index(drop=True)
-    # Safe in both modes: every integer column is a feature, and features are
-    # required non-null above, so there's no NaN left for int64 to choke on.
     for col in integer_cols:
         df[col] = df[col].astype("int64")
     return df

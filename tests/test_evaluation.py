@@ -1,11 +1,4 @@
-"""
-Tests for the shared evaluation helpers and the delta-reconstruction path —
-run with: pytest tests/
-
-These guard the two mistakes that silently wrecked a whole training run:
-reconstructing absolute AQI from a SCALED anchor, and feeding recurrent
-windows that stop one row short of the prediction origin.
-"""
+"""Evaluation helper tests."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -26,7 +19,7 @@ def test_reconstruct_absolute_applies_shrinkage():
 
     np.testing.assert_allclose(reconstruct_absolute(aqi_now, delta), [120.0, 160.0])
     np.testing.assert_allclose(reconstruct_absolute(aqi_now, delta, 0.5), [110.0, 180.0])
-    # shrinkage=0 collapses to persistence
+    # shrink=0 means no change
     np.testing.assert_allclose(reconstruct_absolute(aqi_now, delta, 0.0), aqi_now)
 
 
@@ -41,7 +34,7 @@ def test_shrinkage_collapses_useless_predictions_to_persistence():
     rng = np.random.default_rng(0)
     aqi_now = rng.uniform(50, 300, 500)
     true_delta = rng.normal(0, 20, 500)
-    noise_delta = rng.normal(0, 60, 500)  # uncorrelated with the truth
+    noise_delta = rng.normal(0, 60, 500)
 
     lam, diag = fit_delta_shrinkage(aqi_now, aqi_now + true_delta, noise_delta)
     assert lam < 0.3
@@ -61,7 +54,7 @@ def test_shrinkage_keeps_a_good_signal():
 def test_beats_persistence_requires_all_three_metrics():
     baseline = {"RMSE": 90.0, "MAE": 50.0, "R2": 0.5}
     assert beats_persistence({"RMSE": 80.0, "MAE": 45.0, "R2": 0.6}, baseline)
-    # better RMSE/R2 but worse MAE must not pass
+    # Must win on all three scores
     assert not beats_persistence({"RMSE": 80.0, "MAE": 55.0, "R2": 0.6}, baseline)
 
 
@@ -82,7 +75,7 @@ def test_make_sequences_window_ends_on_prediction_origin():
     )
 
     assert X.shape == (n - seq_len + 1, seq_len, 2)
-    # window k must END on row k+seq_len-1, the row its target belongs to
+    # Window ends on the hour we predict from
     for k in (0, 5, len(y) - 1):
         origin = k + seq_len - 1
         np.testing.assert_allclose(X[k][-1], [df["aqi"][origin], df["pm2_5"][origin]])
@@ -92,7 +85,7 @@ def test_make_sequences_window_ends_on_prediction_origin():
 
 
 def test_recurrent_anchor_is_not_scaled():
-    """The reconstruction anchor must survive feature scaling untouched."""
+    """Anchor AQI must stay unscaled."""
     from sklearn.preprocessing import StandardScaler
 
     n, seq_len = 40, 4
@@ -102,7 +95,7 @@ def test_recurrent_anchor_is_not_scaled():
         "pm2_5": np.linspace(10, 90, n),
         "aqi_delta_24h": np.linspace(-20, 20, n),
     })
-    anchor = df["aqi"].to_numpy(float)  # captured BEFORE scaling
+    anchor = df["aqi"].to_numpy(float)
 
     scaled = df.copy()
     scaled[feature_cols] = StandardScaler().fit_transform(scaled[feature_cols])
@@ -110,5 +103,5 @@ def test_recurrent_anchor_is_not_scaled():
     _, _, anchor_out, _ = make_sequences(
         scaled, feature_cols, "aqi_delta_24h", seq_len=seq_len, anchor=anchor,
     )
-    # If the anchor came off the scaled frame it would sit near 0, not near AQI
+    # Scaled AQI would sit near 0.
     assert anchor_out.min() >= 100.0

@@ -1,9 +1,4 @@
-"""
-Shared evaluation helpers for training / Colab / reports.
-
-All model families are scored on absolute future AQI (RMSE, MAE, R2) so
-delta-trained models, Prophet (absolute), and persistence are comparable.
-"""
+"""Score models on absolute future AQI so they can be compared."""
 from __future__ import annotations
 
 import numpy as np
@@ -24,11 +19,7 @@ def evaluate(y_true, y_pred, name: str) -> dict:
 
 
 def reconstruct_absolute(aqi_now, y_delta_pred, shrinkage: float = 1.0):
-    """
-    Convert delta predictions back to absolute AQI: aqi_now + shrinkage * delta.
-
-    shrinkage=1.0 is the raw model, shrinkage=0.0 collapses to persistence.
-    """
+    """Turn a predicted change back into AQI. shrinkage=0 means no change."""
     return (
         np.asarray(aqi_now, dtype=float)
         + float(shrinkage) * np.asarray(y_delta_pred, dtype=float)
@@ -44,22 +35,7 @@ def fit_delta_shrinkage(
     y_delta_pred,
     grid=SHRINKAGE_GRID,
 ) -> tuple[float, dict]:
-    """
-    Fit the delta shrinkage factor on VALIDATION data — never on test.
-
-    Predicted deltas are noisy, and an over-confident delta hurts the many
-    hours where AQI barely moves (which is where persistence is near-exact).
-    Scaling the predicted delta down trades a little responsiveness on big
-    swings for accuracy on typical hours. lambda=0 reproduces persistence
-    exactly and lambda=1 is the untouched model, so the search can only pick
-    something that is at least as good as persistence *on validation*.
-
-    Scored on relative RMSE + relative MAE against the lambda=0 point because
-    the registry gate demands beating persistence on RMSE, MAE and R2 at once
-    (for a fixed y_true, R2 is monotone in RMSE, so it needs no separate term).
-
-    Returns (lambda, diagnostics).
-    """
+    """Pick a shrink factor on validation. Never use test for this."""
     eps = 1e-12
     base = evaluate(y_absolute_true, reconstruct_absolute(aqi_now, y_delta_pred, 0.0), "lam=0")
     best_lam, best_score, best_metrics = 0.0, 1.0, base
@@ -82,10 +58,7 @@ def fit_delta_shrinkage(
 
 
 def persistence_baseline(test_df: pd.DataFrame, absolute_target_col: str) -> dict:
-    """
-    'AQI in N hours = AQI right now'. Equivalent to predicting delta = 0.
-    Computed once per horizon and reused for every model/ensemble comparison.
-    """
+    """Guess that AQI later equals AQI now."""
     return evaluate(
         test_df[absolute_target_col],
         test_df["aqi"],
@@ -94,7 +67,7 @@ def persistence_baseline(test_df: pd.DataFrame, absolute_target_col: str) -> dic
 
 
 def beats_persistence(model_metrics: dict, baseline_metrics: dict) -> bool:
-    """True only if the model beats persistence on RMSE, MAE, AND R2."""
+    """Must beat persistence on RMSE, MAE and R²."""
     return (
         model_metrics["RMSE"] < baseline_metrics["RMSE"]
         and model_metrics["MAE"] < baseline_metrics["MAE"]
@@ -103,10 +76,7 @@ def beats_persistence(model_metrics: dict, baseline_metrics: dict) -> bool:
 
 
 def pick_best_candidate(results: list[dict], baseline: dict) -> dict | None:
-    """
-    Among candidates that beat persistence on all three metrics, pick lowest
-    RMSE (then MAE, then highest R2). Returns None if nobody qualifies.
-    """
+    """Best model that beats persistence. None if nobody does."""
     eligible = [r for r in results if r["model"] != "Persistence Baseline"
                 and beats_persistence(r, baseline)]
     if not eligible:

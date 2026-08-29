@@ -1,16 +1,9 @@
-"""
-Windowing helper for the recurrent models.
-
-Lives outside train_lstm.py on purpose: the alignment rules below are where
-the recurrent path silently broke before, and keeping them free of the
-TensorFlow import means they stay unit-testable anywhere (TF is only installed
-for the Colab/GPU training runs).
-"""
+"""Turn a table into 24-hour windows for LSTM / GRU."""
 from __future__ import annotations
 
 import numpy as np
 
-SEQUENCE_LENGTH = 24  # look back 24 hours to predict the target horizon
+SEQUENCE_LENGTH = 24
 
 
 def make_sequences(
@@ -21,25 +14,7 @@ def make_sequences(
     anchor: np.ndarray | None = None,
     absolute_target: np.ndarray | None = None,
 ):
-    """
-    Turn a flat feature table into (samples, timesteps, features) windows.
-
-    Window i covers rows [i-seq_len+1 .. i] INCLUSIVE and predicts the target at
-    row i. Ending the window on the prediction origin matters for delta targets:
-    the delta is defined relative to the AQI at row i, so a window stopping at
-    i-1 asks the net for a delta against a value it was never shown, while the
-    tabular models do get row i.
-
-    `anchor` (current AQI) and `absolute_target` (absolute future AQI) are
-    optional row-aligned arrays sliced the same way as the targets. They must be
-    UNSCALED — `aqi` is itself a model feature, so scaling the frame in place
-    standardizes it, and reconstructing from that adds ~0 instead of the real
-    AQI level, silently turning the absolute prediction into the bare delta.
-    Passing them in explicitly is what keeps that impossible.
-
-    Returns (X, y, anchor_windowed, absolute_target_windowed); the last two are
-    None when not supplied.
-    """
+    """Each window ends on the hour we predict from. Pass unscaled AQI as anchor."""
     values = np.asarray(df[feature_cols].values, dtype=float)
     targets = np.asarray(df[target_col].values, dtype=float)
     n = len(df)

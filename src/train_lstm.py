@@ -1,18 +1,4 @@
-"""
-Recurrent models (LSTM / GRU) for AQI forecasting — TensorFlow/Keras.
-
-Kept in its own module because recurrent nets need a windowed 3D input
-(samples, timesteps, features) instead of the flat 2D table the
-scikit-learn / XGBoost models use. train_gru.py delegates here so the two
-share one implementation.
-
-When target_col is an aqi_delta_* column, metrics are reported on
-reconstructed absolute AQI (aqi at the prediction origin + predicted delta)
-vs the matching aqi_target_* column.
-
-Windowing (and the two alignment rules that broke a whole run before) lives in
-src/utils/sequences.py so it can be tested without importing TensorFlow.
-"""
+"""LSTM / GRU for AQI. Windows of 24 hours, not a flat table."""
 from __future__ import annotations
 
 import os
@@ -25,7 +11,7 @@ from src.utils.sequences import SEQUENCE_LENGTH, make_sequences  # noqa: F401 (r
 
 
 def build_recurrent(kind: str, n_timesteps: int, n_features: int) -> keras.Model:
-    """Two stacked recurrent layers + dense head. kind is 'LSTM' or 'GRU'."""
+    """Two recurrent layers plus a small dense head."""
     layer = keras.layers.LSTM if kind.upper() == "LSTM" else keras.layers.GRU
     model = keras.Sequential([
         keras.layers.Input(shape=(n_timesteps, n_features)),
@@ -41,7 +27,7 @@ def build_recurrent(kind: str, n_timesteps: int, n_features: int) -> keras.Model
     return model
 
 
-# Kept for backwards compatibility with older imports
+# Old name, still imported in a few places
 def build_lstm(n_timesteps: int, n_features: int) -> keras.Model:
     return build_recurrent("LSTM", n_timesteps, n_features)
 
@@ -62,20 +48,10 @@ def train_recurrent_model(
     verbose: int = 0,
     plot_path: str | None = None,
 ):
-    """
-    Train one recurrent model on (usually) the delta target and score it on
-    reconstructed absolute AQI.
-
-    The delta target is standardized before the MSE loss sees it (features
-    already are), which keeps gradient scales comparable and stops the net
-    from spending its early epochs just learning the output magnitude.
-
-    Returns (model, metrics, meta). meta carries everything needed to fit a
-    shrinkage factor on validation and to serve the model later.
-    """
+    """Train one net. Score on reconstructed AQI, not the raw delta."""
     name = report_name or kind.upper()
 
-    # Anchors and absolute truths are read BEFORE any scaling touches the frame.
+    # Read AQI levels before any scaling.
     anchors = {
         "train": train_df[anchor_col].to_numpy(dtype=float),
         "val": val_df[anchor_col].to_numpy(dtype=float),

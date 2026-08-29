@@ -1,9 +1,4 @@
-"""
-Inference Pipeline (served as a FastAPI app)
-=============================================
-Thin HTTP wrapper around src.utils.serving — the Streamlit dashboard can
-call the same serving module directly (needed for Streamlit Cloud).
-"""
+"""FastAPI wrapper around serving. The dashboard can skip this and call serving itself."""
 from __future__ import annotations
 
 import threading

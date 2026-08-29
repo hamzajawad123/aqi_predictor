@@ -1,10 +1,4 @@
-"""
-Shared inference for FastAPI and the Streamlit dashboard.
-
-Loads registered horizon models and the feature-group frame from Hopsworks,
-then returns forecasts plus display-ready current/history series. The
-Streamlit Cloud app calls this directly (no local uvicorn required).
-"""
+"""Load models and make forecasts. Used by FastAPI and Streamlit."""
 from __future__ import annotations
 
 import threading
@@ -189,7 +183,7 @@ def predict_forecasts(df: pd.DataFrame | None = None) -> list[dict]:
 
 
 def predict_payload() -> dict:
-    """JSON-serializable /predict body (FastAPI)."""
+    """JSON body for GET /predict."""
     df = load_feature_frame()
     forecasts = predict_forecasts(df)
     ok = [f["predicted_aqi"] for f in forecasts if f.get("predicted_aqi") is not None]
@@ -231,7 +225,7 @@ def _pkt(ts) -> pd.Timestamp:
 
 
 def dashboard_state() -> dict:
-    """Everything the Streamlit page needs, from one feature-group read."""
+    """One payload for the Streamlit page."""
     df = load_feature_frame()
     forecasts = predict_forecasts(df)
     latest = df.iloc[-1]

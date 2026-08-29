@@ -2,8 +2,8 @@ name: Feature Pipeline (Hourly)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour, at minute 0
-  workflow_dispatch:        # allows manual trigger from the Actions tab
+    - cron: "0 * * * *"   # every hour
+  workflow_dispatch:
 
 jobs:
   run-feature-pipeline:
@@ -28,8 +28,7 @@ jobs:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
-          # Pin here — this is not a secret. An old FEATURE_GROUP_VERSION
-          # repo secret was sending inserts into a pre-delta group.
+          # Always write to feature group v4.
           FEATURE_GROUP_VERSION: "4"
           FEATURE_VIEW_NAME: ${{ secrets.FEATURE_VIEW_NAME }}
         run: python -m src.feature_pipeline

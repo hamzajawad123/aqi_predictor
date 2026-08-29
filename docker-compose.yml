@@ -1,36 +1,14 @@
 version: "3.9"
 
 services:
-  api:
+  aqi:
+    image: hamzajawad/lahore-aqi-predictor:latest
     build:
       context: .
-      dockerfile: api/Dockerfile
-    container_name: aqi_api
+      dockerfile: Dockerfile
+    container_name: aqi_predictor
     env_file: .env
     ports:
       - "8000:8000"
-    networks:
-      - aqi_net
-    restart: unless-stopped
-
-  app:
-    build:
-      context: .
-      dockerfile: app/Dockerfile
-    container_name: aqi_app
-    env_file: .env
-    environment:
-      # Overrides .env's API_BASE_URL so Streamlit reaches the API via the
-      # docker-compose service name (Docker's internal DNS) instead of localhost.
-      - API_BASE_URL=http://api:8000
-    ports:
       - "8501:8501"
-    depends_on:
-      - api
-    networks:
-      - aqi_net
     restart: unless-stopped
-
-networks:
-  aqi_net:
-    driver: bridge

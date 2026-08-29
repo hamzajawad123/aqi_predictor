@@ -1,4 +1,4 @@
-"""Save EDA figures from the local raw snapshot using the same plot recipes as notebooks/01_eda.ipynb."""
+"""Save EDA and RMSE charts for the Word report."""
 from pathlib import Path
 import sys
 
@@ -129,7 +129,7 @@ plt.tight_layout()
 plt.savefig(OUT / "eda_smog.png", dpi=160, bbox_inches="tight")
 plt.close()
 
-# AT8 comparison charts from exact notebook stdout
+# RMSE bars from the first training notebook
 rows = [
     ("24h", "Persistence Baseline", 66.730405, 36.111431, 0.745204),
     ("24h", "XGBoost", 74.364967, 50.019281, 0.683567),
@@ -156,7 +156,7 @@ rows = [
     ("72h", "LSTM", 235.968967, 160.365461, -2.182948),
     ("72h", "GRU", 239.031295, 159.196560, -2.266098),
 ]
-# omit Prophet from bars (scale ~2100 would flatten others); table keeps Prophet
+# Skip Prophet on the bars — RMSE ~2100 would squash the rest
 cmp = pd.DataFrame(rows, columns=["horizon", "model", "RMSE", "MAE", "R2"])
 for h in ("24h", "48h", "72h"):
     sub = cmp[cmp["horizon"] == h].sort_values("RMSE")

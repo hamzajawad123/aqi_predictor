@@ -1,6 +1,4 @@
-"""
-Single-page AQI dashboard. Run with: streamlit run app/Home.py
-"""
+"""AQI dashboard. Run: streamlit run app/Home.py"""
 from __future__ import annotations
 
 import html as html_lib

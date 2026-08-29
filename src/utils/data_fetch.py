@@ -1,31 +1,14 @@
-"""
-Raw data fetching from external APIs.
-
-FINAL SOURCE DECISION (see project discussion):
-- Pollution / AQI  -> OpenWeather Air Pollution API (current, forecast, historical).
-  One source, always, for the actual prediction target — never mixed with
-  another provider's pollution readings.
-- Weather (temp/humidity/wind) -> Open-Meteo (current AND historical). One
-  source, always, for weather too. Earlier drafts used OpenWeather's live
-  weather endpoint for the hourly pipeline but Open-Meteo for backfill —
-  that mismatch is exactly the train/serving skew a feature store exists to
-  prevent, so weather now comes from Open-Meteo everywhere, hourly and
-  historical alike.
-
-All timestamps from both sources are normalized to UTC before being returned,
-so merging them is a plain equi-join on `timestamp` with no manual offset
-math needed.
-"""
+"""Fetch pollution from OpenWeather and weather from Open-Meteo. All times are UTC."""
 import requests
 import pandas as pd
 from src import config
 
-# --- OpenWeather (pollution/AQI only) ---
+# OpenWeather — pollution only
 AIR_POLLUTION_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
 AIR_POLLUTION_FORECAST_URL = "http://api.openweathermap.org/data/2.5/air_pollution/forecast"
 AIR_POLLUTION_HISTORY_URL = "http://api.openweathermap.org/data/2.5/air_pollution/history"
 
-# --- Open-Meteo (weather only) ---
+# Open-Meteo — weather only
 OPENMETEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPENMETEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -41,13 +24,8 @@ _OPENMETEO_RENAME = {
     "surface_pressure": "pressure",
 }
 
-
-# ---------------------------------------------------------------------------
-# Pollution / AQI — OpenWeather
-# ---------------------------------------------------------------------------
-
 def fetch_current_air_pollution() -> pd.DataFrame:
-    """Current AQI + pollutant concentrations for the configured city."""
+    """Live pollution for the city."""
     params = {
         "lat": config.LATITUDE,
         "lon": config.LONGITUDE,
@@ -59,9 +37,7 @@ def fetch_current_air_pollution() -> pd.DataFrame:
 
 
 def fetch_air_pollution_forecast() -> pd.DataFrame:
-    """4-day-ahead pollution forecast (hourly). Not used by the current
-    training pipeline, but useful if you later want the model to compare
-    against OpenWeather's own forecast as a baseline."""
+    """OpenWeather 4-day pollution forecast. Not used in training."""
     params = {
         "lat": config.LATITUDE,
         "lon": config.LONGITUDE,
@@ -73,10 +49,7 @@ def fetch_air_pollution_forecast() -> pd.DataFrame:
 
 
 def fetch_historical_air_pollution(start_unix: int, end_unix: int) -> pd.DataFrame:
-    """
-    Historical AQI + pollutant data between two UNIX (UTC) timestamps.
-    Free since 27 Nov 2020. Used by the backfill script.
-    """
+    """Past pollution between two UTC unix times. Free from 27 Nov 2020."""
     params = {
         "lat": config.LATITUDE,
         "lon": config.LONGITUDE,
@@ -90,26 +63,17 @@ def fetch_historical_air_pollution(start_unix: int, end_unix: int) -> pd.DataFra
 
 
 def _pollution_json_to_df(payload: dict) -> pd.DataFrame:
-    """
-    Flatten OpenWeather's air pollution JSON response into a tidy dataframe.
-    OpenWeather's `dt` field is already a UTC Unix timestamp.
-
-    IMPORTANT: `aqi` here is the REAL US EPA AQI, computed from PM2.5 (see
-    aqi_calculation.py) — NOT OpenWeather's own `main.aqi` field, which is
-    only a coarse 1-5 category. That raw OpenWeather value is kept as
-    `openweather_aqi_category` for reference/EDA only; it is never used as
-    a model feature or target.
-    """
+    """OpenWeather JSON to a table. aqi is EPA from PM2.5, not the 1–5 score."""
     from src.utils.aqi_calculation import pm25_to_aqi
 
     rows = []
     for item in payload.get("list", []):
         row = {
             "timestamp": item["dt"],
-            "openweather_aqi_category": item["main"]["aqi"],  # reference only, 1-5
+            "openweather_aqi_category": item["main"]["aqi"],  # 1–5, not the target
         }
-        row.update(item["components"])  # co, no, no2, o3, so2, pm2_5, pm10, nh3
-        row["aqi"] = pm25_to_aqi(row["pm2_5"])  # the REAL continuous AQI, our actual target
+        row.update(item["components"])
+        row["aqi"] = pm25_to_aqi(row["pm2_5"])
         rows.append(row)
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -117,18 +81,11 @@ def _pollution_json_to_df(payload: dict) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Weather — Open-Meteo (current + historical, same provider both places)
-# ---------------------------------------------------------------------------
+# Weather
+
 
 def fetch_openmeteo_current_weather() -> pd.DataFrame:
-    """
-    Live weather via Open-Meteo's forecast endpoint's `current` block.
-    Returned as a one-row dataframe so it merges the same way historical
-    weather does. `timezone=UTC` is set EXPLICITLY — Open-Meteo's `auto`
-    option returns local time, which silently misaligns with OpenWeather's
-    UTC timestamps if you forget to convert it back.
-    """
+    """Live weather. timezone=UTC so it lines up with OpenWeather."""
     params = {
         "latitude": config.LATITUDE,
         "longitude": config.LONGITUDE,
@@ -145,13 +102,7 @@ def fetch_openmeteo_current_weather() -> pd.DataFrame:
 
 
 def fetch_openmeteo_recent_weather(past_days: int = 9) -> pd.DataFrame:
-    """
-    Recent weather (last `past_days` days, hourly) via Open-Meteo's FORECAST
-    endpoint's `past_days` param -- NOT the archive endpoint, which lags
-    ~5 days behind for reanalysis QC and would return nothing for "yesterday".
-    Used by the hourly pipeline to get enough lookback history to compute
-    lag/rolling features for the current hour (see feature_pipeline.py).
-    """
+    """Weather for the last few days. Use this, not the archive, for yesterday."""
     params = {
         "latitude": config.LATITUDE,
         "longitude": config.LONGITUDE,
@@ -169,14 +120,7 @@ def fetch_openmeteo_recent_weather(past_days: int = 9) -> pd.DataFrame:
 
 
 def fetch_openmeteo_historical_weather(start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Historical weather via Open-Meteo's archive endpoint.
-    `timezone=UTC` explicit (see note above — `auto` was a real bug in an
-    earlier draft of this function, since it silently returned local
-    Asia/Karachi time instead of UTC, misaligning every row against
-    OpenWeather's UTC pollution timestamps by 5 hours).
-    start_date/end_date format: 'YYYY-MM-DD'.
-    """
+    """Archive weather. Dates as YYYY-MM-DD. Always UTC."""
     params = {
         "latitude": config.LATITUDE,
         "longitude": config.LONGITUDE,
@@ -194,13 +138,7 @@ def fetch_openmeteo_historical_weather(start_date: str, end_date: str) -> pd.Dat
 
 
 def fetch_openmeteo_air_quality() -> pd.DataFrame:
-    """
-    OPTIONAL cross-check only (not used in the main pipeline): Open-Meteo's
-    own Air Quality API (CAMS-based), useful for validating OpenWeather's AQI
-    numbers in your report, or as a fallback if OpenWeather's quota runs out.
-    Do NOT mix this into the same feature column as OpenWeather's AQI —
-    keep it as a separate, clearly-labelled comparison column if you use it.
-    """
+    """Open-Meteo air quality. Not used in the main pipeline."""
     url = "https://air-quality-api.open-meteo.com/v1/air-quality"
     params = {
         "latitude": config.LATITUDE,
@@ -216,17 +154,12 @@ def fetch_openmeteo_air_quality() -> pd.DataFrame:
     return df.drop(columns=["time"])
 
 
-# ---------------------------------------------------------------------------
-# Merge helper — combine pollution (OpenWeather) + weather (Open-Meteo)
-# ---------------------------------------------------------------------------
+# Merge
+
 
 def merge_pollution_and_weather(pollution_df: pd.DataFrame,
                                  weather_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Both dataframes are UTC and hourly by construction, so this is a plain
-    inner join on `timestamp` — no timezone math needed at merge time
-    because it was already handled when each was fetched.
-    """
+    """Inner join on timestamp. Both sides are already UTC hourly."""
     if pollution_df.empty or weather_df.empty:
         return pd.DataFrame()
     merged = pd.merge(pollution_df, weather_df, on="timestamp", how="inner")

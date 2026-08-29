@@ -18,7 +18,8 @@
 - [Run the complete local stack](#run-the-complete-local-stack)
 - [Docker](#docker)
   - [Option A — Docker Compose (recommended)](#option-a--docker-compose-recommended)
-  - [Option B — Build and run the images yourself](#option-b--build-and-run-the-images-yourself)
+  - [Option B — Build and run the image yourself](#option-b--build-and-run-the-image-yourself)
+  - [Option C — Pull from Docker Hub](#option-c--pull-from-docker-hub)
 - [Data, training, and notebooks](#data-training-and-notebooks)
 - [GitHub Actions](#github-actions)
 - [API endpoints](#api-endpoints)
@@ -67,7 +68,7 @@ Default location in `src/config.py` / `.env.example`: **Lahore**, latitude `31.5
 - Streamlit dashboard that reads Hopsworks through `src/utils/serving.py`
 - Optional FastAPI routes: `GET /health`, `GET /predict`, `GET /model-metrics`
 - GitHub Actions: hourly feature pipeline, daily training pipeline
-- Docker images for the API and dashboard (`api/Dockerfile`, `app/Dockerfile`, `docker compose up --build`)
+- Docker image for the dashboard and API (`Dockerfile`, `docker compose up --build`)
 
 ---
 
@@ -78,7 +79,7 @@ Default location in `src/config.py` / `.env.example`: **Lahore**, latitude `31.5
 
 | Area                                          | What this repo uses                                                                 |
 | --------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Language                                      | Python **3.11** (GitHub Actions and Dockerfiles)                                    |
+| Language                                      | Python **3.11** (GitHub Actions and `Dockerfile`)                                   |
 | Dashboard                                     | Streamlit (`app/Home.py`, `app/requirements.txt`)                                   |
 | Optional API                                  | FastAPI + Uvicorn (`api/main.py`, `api/requirements.txt`)                           |
 | Feature store / registry                      | Hopsworks                                                                           |
@@ -86,7 +87,7 @@ Default location in `src/config.py` / `.env.example`: **Lahore**, latitude `31.5
 | Weather data                                  | Open-Meteo                                                                          |
 | Training stack (repo root `requirements.txt`) | scikit-learn, XGBoost, LightGBM, TensorFlow, Prophet, Optuna, SHAP                  |
 | Tests                                         | pytest (`tests/`)                                                                   |
-| Containers                                    | `docker-compose.yml`, `api/Dockerfile`, `app/Dockerfile`                            |
+| Containers                                    | `Dockerfile`, `docker-compose.yml`                                                  |
 | CI                                            | `.github/workflows/feature_pipeline.yml`, `.github/workflows/training_pipeline.yml` |
 
 
@@ -183,7 +184,7 @@ http://localhost:8501
 
 You need a Hopsworks project that already has feature group **v4** and registered models. If the store is empty, follow [Data, training, and notebooks](#data-training-and-notebooks) first.
 
-To run from Docker images instead of a local Python venv, see [Docker](#docker).
+To run from a Docker image instead of a local Python venv, see [Docker](#docker).
 
 ---
 
@@ -256,7 +257,7 @@ source .venv/bin/activate
 python -m pip install -r app/requirements.txt
 ```
 
-**Optional API** (same packages as `api/Dockerfile`):
+**Optional API** (same packages as `api/requirements.txt`):
 
 ```bash
 python -m pip install -r api/requirements.txt
@@ -320,7 +321,7 @@ Variables from `[.env.example](.env.example)` and defaults from `[src/config.py]
 | `MODEL_NAME`             | Optional                                                            | Default `aqi_forecaster`                                                                                                           |
 | `TRAIN_START_DATE`       | Optional                                                            | Default `2025-04-04`. Empty string trains on all history                                                                           |
 | `USE_DELTA_SHRINKAGE`    | Optional                                                            | Default `true`                                                                                                                     |
-| `API_BASE_URL`           | Compose / legacy                                                    | `.env.example` value `http://api:8000` (Docker service name). `app/Home.py` **does not read this**; it uses `src/utils/serving.py` |
+| `API_BASE_URL`           | Optional                                                            | `.env.example` value `http://localhost:8000`. `app/Home.py` **does not read this**; it uses `src/utils/serving.py` |
 
 
 Example shape (use your own secrets):
@@ -374,7 +375,7 @@ streamlit run app/Home.py
 http://localhost:8501
 ```
 
-Docker sets `--server.port=8501` and `--server.address=0.0.0.0` in `app/Dockerfile`. A local `streamlit run` uses Streamlit’s default port **8501** (`.streamlit/config.toml` does not set a port).
+Docker binds the dashboard to `--server.port=8501` and `--server.address=0.0.0.0`. A local `streamlit run` uses Streamlit’s default port **8501** (`.streamlit/config.toml` does not set a port).
 
 `app/client.py` calls `src.utils.serving.dashboard_state()` (Hopsworks). You do **not** need Uvicorn running for this page.
 
@@ -396,7 +397,7 @@ Optional. Same serving logic as the dashboard (`api/main.py` wraps `src.utils.se
 uvicorn api.main:app --reload
 ```
 
-Uvicorn’s default bind is port **8000**. `api/Dockerfile` uses `--host 0.0.0.0 --port 8000`.
+Uvicorn’s default bind is port **8000**. The Docker image also serves the API on port **8000**.
 
 
 | Check         | URL                                   |
@@ -446,9 +447,11 @@ Hopsworks must already contain features and registered models for forecasts to a
 
 ## Docker
 
-You can run this project from **Docker images** instead of installing Python packages on your machine. The images are defined in `[api/Dockerfile](api/Dockerfile)` (FastAPI, port 8000) and `[app/Dockerfile](app/Dockerfile)` (Streamlit, port 8501). Both start from `python:3.11-slim`.
+You can run this project from **one Docker image** instead of installing Python packages on your machine. The image is defined in `[Dockerfile](Dockerfile)` (`python:3.11-slim`). One container starts FastAPI on port **8000** and Streamlit on port **8501**.
 
-A published Docker Hub image name is **not recorded** in this repository, so there is no `docker pull user/name` URL to copy yet. The procedure below **builds the images from this repo**, then runs them. You still need Docker Desktop (Windows/macOS) or Docker Engine + Compose, a clone of the repo, and a root `.env` (Hopsworks keys at minimum for the dashboard).
+Published image: **[hamzajawad/lahore-aqi-predictor](https://hub.docker.com/r/hamzajawad/lahore-aqi-predictor)**.
+
+You still need Docker Desktop (Windows/macOS) or Docker Engine + Compose, and a root `.env` (Hopsworks keys at minimum for the dashboard). Secrets are not baked into the image; pass them at run time with `--env-file .env`.
 
 Confirm Docker:
 
@@ -467,16 +470,13 @@ From the **repository root**, with `.env` present (`docker-compose.yml` uses `en
 docker compose up --build
 ```
 
-This builds both images and starts both containers. The first run downloads `python:3.11-slim` if it is not already on your machine.
+This builds the image and starts one container. The first run downloads `python:3.11-slim` if it is not already on your machine.
 
 
-| Service | Container name | Host port | Image command                                                           |
-| ------- | -------------- | --------- | ----------------------------------------------------------------------- |
-| `api`   | `aqi_api`      | **8000**  | `uvicorn api.main:app --host 0.0.0.0 --port 8000`                       |
-| `app`   | `aqi_app`      | **8501**  | `streamlit run app/Home.py --server.port=8501 --server.address=0.0.0.0` |
+| Service | Container name   | Host ports     | Processes                                      |
+| ------- | ---------------- | -------------- | ---------------------------------------------- |
+| `aqi`   | `aqi_predictor`  | **8000**, **8501** | FastAPI (`uvicorn`) and Streamlit              |
 
-
-Compose sets `API_BASE_URL=http://api:8000` on the `app` service. `app/Home.py` currently does not use that variable.
 
 Open:
 
@@ -485,7 +485,7 @@ Dashboard:  http://localhost:8501
 API health: http://localhost:8000/health
 ```
 
-Healthchecks inside the images:
+Healthcheck inside the image:
 
 - API: `http://localhost:8000/health`
 - App: `http://localhost:8501/_stcore/health`
@@ -496,66 +496,68 @@ Run in the background:
 docker compose up --build -d
 ```
 
-Stop and remove the containers:
+Stop and remove the container:
 
 ```bash
 docker compose down
 ```
 
+### Option B — Build and run the image yourself
 
-
-### Option B — Build and run the images yourself
-
-Use this if you want the Docker images without Compose, or you only want the dashboard image.
-
-From the **repository root** (build context is `.` because both Dockerfiles `COPY src/` from the repo root):
+From the **repository root** (build context is `.` because the Dockerfile copies `src/`, `api/`, and `app/` from the repo root):
 
 **1. Build**
 
 ```bash
-docker build -f api/Dockerfile -t aqi-api:local .
-docker build -f app/Dockerfile -t aqi-app:local .
+docker build -t hamzajawad/lahore-aqi-predictor:latest .
 ```
 
-**2. Confirm the images exist**
+**2. Confirm the image exists**
 
 ```bash
-docker images aqi-api:local
-docker images aqi-app:local
+docker images hamzajawad/lahore-aqi-predictor
 ```
 
-**3. Run the dashboard image**
+**3. Run**
 
 ```bash
-docker run --rm --name aqi_app --env-file .env -p 8501:8501 aqi-app:local
+docker run --rm --name aqi_predictor --env-file .env -p 8501:8501 -p 8000:8000 hamzajawad/lahore-aqi-predictor:latest
 ```
 
 ```text
-http://localhost:8501
+Dashboard:  http://localhost:8501
+API health: http://localhost:8000/health
 ```
 
-**4. Run the API image** (optional, separate terminal)
-
-```bash
-docker run --rm --name aqi_api --env-file .env -p 8000:8000 aqi-api:local
-```
-
-```text
-http://localhost:8000/health
-```
-
-**5. Stop**
+**4. Stop**
 
 In the terminal running the container: **Ctrl+C**.
 
 Or from another terminal:
 
 ```bash
-docker stop aqi_app
-docker stop aqi_api
+docker stop aqi_predictor
 ```
 
-`--env-file .env` passes the same variables Compose uses. `--rm` deletes the container when it stops; the **images** stay until you run `docker rmi aqi-app:local aqi-api:local`.
+`--env-file .env` passes the same variables Compose uses. `--rm` deletes the container when it stops; the **image** stays until you run `docker rmi hamzajawad/lahore-aqi-predictor:latest`.
+
+### Option C — Pull from Docker Hub
+
+If the image is already on Docker Hub, you do not need to build from this repo:
+
+```bash
+docker pull hamzajawad/lahore-aqi-predictor:latest
+docker run --rm --name aqi_predictor --env-file .env -p 8501:8501 -p 8000:8000 hamzajawad/lahore-aqi-predictor:latest
+```
+
+You still need a local `.env` with Hopsworks credentials. The dashboard talks to Hopsworks; models are not stored inside the image.
+
+To publish a locally built image:
+
+```bash
+docker login
+docker push hamzajawad/lahore-aqi-predictor:latest
+```
 
 ---
 
@@ -669,11 +671,9 @@ aqi_predictor/
 ├── .streamlit/
 │   └── config.toml
 ├── api/
-│   ├── Dockerfile
 │   ├── main.py
 │   └── requirements.txt
 ├── app/
-│   ├── Dockerfile
 │   ├── Home.py
 │   ├── bootstrap.py
 │   ├── charts.py
@@ -714,7 +714,9 @@ aqi_predictor/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
 ├── docker-compose.yml
+├── docker-entrypoint.sh
 ├── README.md
 └── requirements.txt
 ```
@@ -738,7 +740,9 @@ aqi_predictor/
 | `[src/utils/serving.py](src/utils/serving.py)`           | Model load, `/predict` body, dashboard payload      |
 | `[src/utils/data_fetch.py](src/utils/data_fetch.py)`     | OpenWeather + Open-Meteo                            |
 | `[.env.example](.env.example)`                           | Env template                                        |
-| `[docker-compose.yml](docker-compose.yml)`               | API :8000 + app :8501                               |
+| `[docker-compose.yml](docker-compose.yml)`               | One container: API :8000 + dashboard :8501          |
+| `[Dockerfile](Dockerfile)`                               | Image for API and dashboard                         |
+| `[docker-entrypoint.sh](docker-entrypoint.sh)`           | Starts FastAPI and Streamlit in one container       |
 | `[reports/final_report.docx](reports/final_report.docx)` | Project write-up (if present in your clone)         |
 | `[tests/](tests/)`                                       | pytest                                              |
 
@@ -763,13 +767,12 @@ aqi_predictor/
 | `python -m src.feature_pipeline`                             | Hourly feature job                                    |
 | `python -m src.feature_pipeline backfill`                    | Historical Hopsworks insert                           |
 | `python -m src.training_pipeline`                            | Train and maybe register                              |
-| `docker compose up --build`                                  | Build images from this repo and start API + dashboard |
+| `docker compose up --build`                                  | Build the image from this repo and start API + dashboard |
 | `docker compose up --build -d`                               | Same, detached                                        |
 | `docker compose down`                                        | Stop Compose stack                                    |
-| `docker build -f api/Dockerfile -t aqi-api:local .`          | Build API image                                       |
-| `docker build -f app/Dockerfile -t aqi-app:local .`          | Build dashboard image                                 |
-| `docker run --rm --env-file .env -p 8501:8501 aqi-app:local` | Run dashboard image                                   |
-| `docker run --rm --env-file .env -p 8000:8000 aqi-api:local` | Run API image                                         |
+| `docker build -t hamzajawad/lahore-aqi-predictor:latest .`   | Build the image                                       |
+| `docker pull hamzajawad/lahore-aqi-predictor:latest`         | Pull the image from Docker Hub                        |
+| `docker run --rm --env-file .env -p 8501:8501 -p 8000:8000 hamzajawad/lahore-aqi-predictor:latest` | Run the image |
 | `pytest tests/`                                              | Run tests                                             |
 
 
@@ -793,7 +796,7 @@ pytest tests/
 
 - Streamlit or Uvicorn in a terminal: **Ctrl+C**
 - Docker Compose: `docker compose down` from the repo root
-- Docker images started with `docker run --name aqi_app` / `aqi_api`: `docker stop aqi_app` and `docker stop aqi_api`
+- Docker image started with `docker run --name aqi_predictor`: `docker stop aqi_predictor`
 
 ---
 
@@ -817,7 +820,7 @@ Set the requirements file to `app/requirements.txt`, not the repo-root `requirem
 Default and GitHub Actions pin **4**. An old `FEATURE_GROUP_VERSION` secret can write to a pre-delta group; `hopsworks_utils.py` explains that failure.
 
 **Port 8501 or 8000 already in use** (general)  
-Stop the other process or change the port in the run command. This repo’s Dockerfiles use 8501 and 8000.
+Stop the other process or change the port in the run command. The Docker image uses 8501 and 8000.
 
 `docker compose` **cannot start**  
 Compose requires a root `.env` (`env_file: .env`). Docker Desktop (or Engine + Compose plugin) must be running.
@@ -834,7 +837,7 @@ Windows: `.venv\Scripts\activate`. If `python` is not found, use `py -3.11`.
 
 ## Security
 
-Never commit API keys, tokens, or `.env` to GitHub. `.gitignore` already ignores `.env` and `.env.*` except `.env.example`.
+Never commit API keys, tokens, or `.env` to GitHub or into a Docker image. `.gitignore` already ignores `.env` and `.env.*` except `.env.example`. `.dockerignore` keeps `.env` out of the build context. Pass secrets at run time with `--env-file .env` or Compose `env_file`.
 
 There is no `SECURITY.md` in this repository.
 
@@ -848,6 +851,7 @@ There is no `SECURITY.md` in this repository.
 |                   |                                                                                                                |
 | ----------------- | -------------------------------------------------------------------------------------------------------------- |
 | Source repository | [https://github.com/hamzajawad123/aqi_predictor](https://github.com/hamzajawad123/aqi_predictor)               |
+| Docker Hub        | [https://hub.docker.com/r/hamzajawad/lahore-aqi-predictor](https://hub.docker.com/r/hamzajawad/lahore-aqi-predictor) |
 | Issue tracker     | [https://github.com/hamzajawad123/aqi_predictor/issues](https://github.com/hamzajawad123/aqi_predictor/issues) |
 | Live app          | [https://lahore-aqi-predictor.streamlit.app](https://lahore-aqi-predictor.streamlit.app)                       |
 | OpenWeather API   | [https://openweathermap.org/api](https://openweathermap.org/api)                                               |

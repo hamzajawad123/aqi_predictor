@@ -1,4 +1,4 @@
-"""Plotly figures — fixed heights so Streamlit does not stack them."""
+"""Plotly charts with a fixed height."""
 from __future__ import annotations
 
 import pandas as pd

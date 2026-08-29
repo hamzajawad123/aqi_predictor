@@ -1,4 +1,4 @@
-"""Hourly-pipeline helpers that don't need a live Hopsworks connection."""
+"""Feature pipeline helpers. No live Hopsworks."""
 import pandas as pd
 
 from src.feature_pipeline import _as_utc, _unix_utc
@@ -18,7 +18,7 @@ def test_as_utc_string_compare_would_have_missed():
     naive = pd.Series([pd.Timestamp("2026-08-18 05:00:00")])
     hopsworks_style = pd.Series(["2026-08-18 05:00:00+00:00"])
 
-    # The old .astype(str) path treats these as different keys.
+    # String compare used to treat these as different.
     assert naive.astype(str).iloc[0] != hopsworks_style.astype(str).iloc[0]
 
 
