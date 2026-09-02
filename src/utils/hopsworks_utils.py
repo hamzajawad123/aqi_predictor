@@ -1,7 +1,31 @@
 """Talk to Hopsworks the same way from every pipeline."""
 import os
+import time
 import hopsworks
 from src import config
+
+_INSERT_RETRIES = 4
+_INSERT_WAIT_SEC = (5, 15, 30)
+
+
+def insert_feature_rows(fg, features_df):
+    """Insert rows. Retry when Hopsworks drops the connection after upload."""
+    last_error = None
+    for attempt in range(1, _INSERT_RETRIES + 1):
+        try:
+            fg.insert(features_df)
+            return
+        except Exception as e:
+            last_error = e
+            if attempt >= _INSERT_RETRIES:
+                break
+            wait = _INSERT_WAIT_SEC[min(attempt - 1, len(_INSERT_WAIT_SEC) - 1)]
+            print(
+                f"[hopsworks] Insert attempt {attempt} failed ({e}). "
+                f"Retrying in {wait}s..."
+            )
+            time.sleep(wait)
+    raise last_error
 
 
 def get_project():

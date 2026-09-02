@@ -453,5 +453,5 @@ def train_and_evaluate():
 
 
 if __name__ == "__main__":
-    config.validate_config()
+    config.validate_config(require_openweather=False)
     train_and_evaluate()

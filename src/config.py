@@ -50,12 +50,14 @@ RAW_DATA_PATH = os.getenv("RAW_DATA_PATH", "data/raw/aqi_raw_merged.parquet")
 SMOG_SEASON_MONTHS = (10, 11, 12, 1)
 
 
-def validate_config():
+def validate_config(*, require_openweather: bool = True):
+    """Training only needs Hopsworks. Fetch/hourly/backfill also need OpenWeather."""
     required = {
-        "OPENWEATHER_API_KEY": OPENWEATHER_API_KEY,
         "HOPSWORKS_API_KEY": HOPSWORKS_API_KEY,
         "HOPSWORKS_PROJECT_NAME": HOPSWORKS_PROJECT_NAME,
     }
+    if require_openweather:
+        required["OPENWEATHER_API_KEY"] = OPENWEATHER_API_KEY
     missing = [k for k, v in required.items() if not v]
     if missing:
         raise EnvironmentError(

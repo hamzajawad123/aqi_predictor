@@ -18,7 +18,11 @@ from src.utils.data_fetch import (
     merge_pollution_and_weather,
 )
 from src.utils.feature_engineering import AQI_LAGS, build_feature_set
-from src.utils.hopsworks_utils import get_feature_store, get_or_create_feature_group
+from src.utils.hopsworks_utils import (
+    get_feature_store,
+    get_or_create_feature_group,
+    insert_feature_rows,
+)
 from src.utils.data_validation import validate_raw_data
 from src.utils.raw_io import save_raw_snapshot, upsert_raw_snapshot
 
@@ -233,7 +237,7 @@ def run_hourly_feature_pipeline():
         print("[feature_pipeline] Nothing new to insert this run.")
         return
 
-    fg.insert(features_df)
+    insert_feature_rows(fg, features_df)
     print(
         f"[feature_pipeline] Inserted {len(features_df)} row(s) "
         f"({features_df['timestamp'].min()} to {features_df['timestamp'].max()}) "
@@ -260,7 +264,7 @@ def backfill_historical(start_date: str | None = None, chunk_days: int = 30):
 
     fs = get_feature_store()
     fg = get_or_create_feature_group(fs, df_for_schema=features_df)
-    fg.insert(features_df)
+    insert_feature_rows(fg, features_df)
 
     print(
         f"[backfill] Done. Inserted {len(features_df)} historical rows "
@@ -285,7 +289,7 @@ def push_features_from_raw():
 
     fs = get_feature_store()
     fg = get_or_create_feature_group(fs, df_for_schema=features_df)
-    fg.insert(features_df)
+    insert_feature_rows(fg, features_df)
     print(
         f"[push-features] Inserted {len(features_df)} rows into "
         f"{config.FEATURE_GROUP_NAME} v{config.FEATURE_GROUP_VERSION}"
