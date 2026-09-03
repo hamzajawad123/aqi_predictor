@@ -34,9 +34,10 @@ data/*
 *.keras
 *.pt
 *.pth
-!reports/**/*.png
-!reports/**/*.csv
-reports/_report_figures/
+
+# Report builders and figures stay local. Only the Word report is in git.
+reports/*
+!reports/final_report.docx
 
 # ---- Hopsworks / MLOps local caches ----
 .hw_cache/

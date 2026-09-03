@@ -620,7 +620,7 @@ python -m src.training_pipeline
 
 Trains 24 / 48 / 72 hour models, scores against persistence, and registers `aqi_forecaster_{24,48,72}h` only when a model beats persistence on RMSE, MAE, and R².
 
-GPU training can also be run from `[notebooks/02_training.ipynb](notebooks/02_training.ipynb)`. Training artefacts are described in `[reports/README.md](reports/README.md)`.
+GPU training can also be run from `[notebooks/02_training.ipynb](notebooks/02_training.ipynb)`. The project write-up is `[reports/final_report.docx](reports/final_report.docx)`.
 
 ---
 
@@ -686,7 +686,7 @@ aqi_predictor/
 │   ├── 01_eda.ipynb
 │   └── 02_training.ipynb
 ├── reports/
-│   └── README.md
+│   └── final_report.docx
 ├── src/
 │   ├── config.py
 │   ├── feature_pipeline.py
@@ -743,7 +743,7 @@ aqi_predictor/
 | `[docker-compose.yml](docker-compose.yml)`               | One container: API :8000 + dashboard :8501          |
 | `[Dockerfile](Dockerfile)`                               | Image for API and dashboard                         |
 | `[docker-entrypoint.sh](docker-entrypoint.sh)`           | Starts FastAPI and Streamlit in one container       |
-| `[reports/final_report.docx](reports/final_report.docx)` | Project write-up (if present in your clone)         |
+| `[reports/final_report.docx](reports/final_report.docx)` | Project write-up                                    |
 | `[tests/](tests/)`                                       | pytest                                              |
 
 
