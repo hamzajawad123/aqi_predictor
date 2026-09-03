@@ -31,8 +31,6 @@
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Useful links](#useful-links)
-- [Contributing](#contributing)
-- [License](#license)
 
 ---
 
@@ -855,8 +853,6 @@ There is no `SECURITY.md` in this repository.
 | Issue tracker     | [https://github.com/hamzajawad123/aqi_predictor/issues](https://github.com/hamzajawad123/aqi_predictor/issues) |
 | Live app          | [https://lahore-aqi-predictor.streamlit.app](https://lahore-aqi-predictor.streamlit.app)                       |
 | OpenWeather API   | [https://openweathermap.org/api](https://openweathermap.org/api)                                               |
-| Hopsworks         | [https://www.hopsworks.ai/](https://www.hopsworks.ai/)                                                         |
-| Project report    | `[reports/final_report.docx](reports/final_report.docx)`                                                       |
-| Notebook notes    | `[notebooks/README.md](notebooks/README.md)`                                                                   |
+| Hopsworks         | [https://www.hopsworks.ai/](https://www.hopsworks.ai/)                                                                                                                |
 
 
