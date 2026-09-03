@@ -235,13 +235,14 @@ def train_one_horizon(
 
     tscv = TimeSeriesSplit(n_splits=5)
 
-    # Prophet on AQI level
+    # Prophet on AQI level. Skip if Stan is missing (common on CI).
     prophet_fit_df = pd.concat([train_df, val_df], ignore_index=True)
     _, prophet_result = train_prophet_model(
         prophet_fit_df, test_df, target_col=abs_col, horizon_hours=horizon
     )
-    prophet_result["horizon_hours"] = horizon
-    results.append(prophet_result)
+    if prophet_result is not None:
+        prophet_result["horizon_hours"] = horizon
+        results.append(prophet_result)
 
     # Tables on AQI change
     for name, tuner in [
