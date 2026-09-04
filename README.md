@@ -618,7 +618,7 @@ python -m src.training_pipeline
 
 Trains 24 / 48 / 72 hour models, scores against persistence, and registers `aqi_forecaster_{24,48,72}h` only when a model beats persistence on RMSE, MAE, and R².
 
-GPU training can also be run from `[notebooks/02_training.ipynb](notebooks/02_training.ipynb)`. The project write-up is `[reports/final_report.docx](reports/final_report.docx)`.
+GPU training can also be run from `[notebooks/02_training.ipynb](notebooks/02_training.ipynb)`. The project write-up is `[reports/final_report.pdf](reports/final_report.pdf)`.
 
 ---
 
@@ -684,7 +684,7 @@ aqi_predictor/
 │   ├── 01_eda.ipynb
 │   └── 02_training.ipynb
 ├── reports/
-│   └── final_report.docx
+│   └── final_report.pdf
 ├── src/
 │   ├── config.py
 │   ├── feature_pipeline.py
@@ -741,7 +741,7 @@ aqi_predictor/
 | `[docker-compose.yml](docker-compose.yml)`               | One container: API :8000 + dashboard :8501          |
 | `[Dockerfile](Dockerfile)`                               | Image for API and dashboard                         |
 | `[docker-entrypoint.sh](docker-entrypoint.sh)`           | Starts FastAPI and Streamlit in one container       |
-| `[reports/final_report.docx](reports/final_report.docx)` | Project write-up                                    |
+| `[reports/final_report.pdf](reports/final_report.pdf)` | Project write-up                                    |
 | `[tests/](tests/)`                                       | pytest                                              |
 
 
@@ -853,6 +853,8 @@ There is no `SECURITY.md` in this repository.
 | Issue tracker     | [https://github.com/hamzajawad123/aqi_predictor/issues](https://github.com/hamzajawad123/aqi_predictor/issues) |
 | Live app          | [https://lahore-aqi-predictor.streamlit.app](https://lahore-aqi-predictor.streamlit.app)                       |
 | OpenWeather API   | [https://openweathermap.org/api](https://openweathermap.org/api)                                               |
-| Hopsworks         | [https://www.hopsworks.ai/](https://www.hopsworks.ai/)                                                                                                                |
+| Hopsworks         | [https://www.hopsworks.ai/](https://www.hopsworks.ai/)                                                         |
+| Project report    | `[reports/final_report.pdf](reports/final_report.pdf)`                                                       |
+| Notebook notes    | `[notebooks/README.md](notebooks/README.md)`                                                                   |
 
 

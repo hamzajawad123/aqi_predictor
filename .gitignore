@@ -35,9 +35,9 @@ data/*
 *.pt
 *.pth
 
-# Report builders and figures stay local. Only the Word report is in git.
+# Report builders and figures stay local. Only the PDF report is in git.
 reports/*
-!reports/final_report.docx
+!reports/final_report.pdf
 
 # ---- Hopsworks / MLOps local caches ----
 .hw_cache/
